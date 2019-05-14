@@ -12,12 +12,14 @@
 #include <rte_mbuf.h>
 #include <rte_flow.h>
 
-#define NUM_MBUFS     65535 // should be 131071
+#define NUM_MBUFS 131071
 #define MEMPOOL_CACHE 256
 #define MAX_QUEUES 64
 #define RX_DESC_DEFAULT	   256
 #define TX_DESC_DEFAULT	   512
 #define MAX_PKT_BURST 32
+//#define RSS_WORKS	1
+#define DST_FILTER	1
 
 #define VNIC_RSS_HASH_TYPES \
 	(ETH_RSS_IPV4 | ETH_RSS_NONFRAG_IPV4_TCP | ETH_RSS_NONFRAG_IPV4_UDP | \
@@ -47,7 +49,6 @@ static void port_config(uint16_t portid)
 	struct rte_eth_dev_info dev_info;
 	struct rte_eth_txconf txq_conf;
 	struct rte_eth_rxconf rxq_conf;
-	struct ether_addr eth_addr;
 	uint16_t nrxq, ntxq;
 	uint16_t nb_rxd = RX_DESC_DEFAULT;
 	uint16_t nb_txd = TX_DESC_DEFAULT;
@@ -58,8 +59,6 @@ static void port_config(uint16_t portid)
 
 	nrxq = RTE_MIN(MAX_QUEUES, dev_info.max_rx_queues);
 	ntxq = rte_lcore_count();
-
-	printf("Configuring Tx %u Rx %u queues\n", ntxq, nrxq);
 
 	r = rte_eth_dev_configure(portid, nrxq, ntxq, &port_conf);
 	if (r < 0)
@@ -73,19 +72,12 @@ static void port_config(uint16_t portid)
 			 "Cannot adjust number of descriptors: err=%d, port=%d\n",
 			 r, portid);
 
-	eth_random_addr((uint8_t *)&eth_addr);
-	r = rte_eth_dev_default_mac_addr_set(portid, &eth_addr);
-	if (r < 0)
-		rte_exit(EXIT_FAILURE,
-			 "rte_eth_dev_default_mac_addr_set failed: %d\n", r);
-
-
 	txq_conf = dev_info.default_txconf;
 	rxq_conf = dev_info.default_rxconf;
 
 	txq_conf.offloads = port_conf.txmode.offloads;
 	rxq_conf.rx_drop_en = 1;
-	rxq_conf.rx_deferred_start = 1;
+	//rxq_conf.rx_deferred_start = 1;
 	rxq_conf.offloads = port_conf.rxmode.offloads;
 
 	for (q = 0; q < ntxq; q++) {
@@ -104,20 +96,48 @@ static void port_config(uint16_t portid)
 				 "rte_eth_rx_queue_setup failed %d\n",
 				 r);
 	}
+	rte_eth_dev_start(portid);
+
+	for (q = 1; q < nrxq; q++)
+		r = rte_eth_dev_rx_queue_stop(portid, q);
 }
 
-static void flow_configure(uint16_t portid, uint16_t nq __rte_unused)
+static void flow_configure(uint16_t portid, uint16_t nq)
 {
 	/* flow only applies to ingress */
 	struct rte_flow_attr attr  = {
 		.ingress = 1,
+#ifdef DST_FILTER
+		//.priority = 65536,
+#endif
+		.group = 16,
 	};
-	struct rte_flow_item_eth eth_zero = { };
+	struct rte_flow_item_eth eth_zero = {
+#ifdef DST_FILTER
+		//.dst.addr_bytes = "\0\xc0\x1d\xc0\xff\xee",
+		.dst.addr_bytes = "\0\xc0\xff\xee\xbe\x11",
+		.src.addr_bytes = "\0\0\0\0\0\0",
+#else
+		.dst.addr_bytes = "\0\0\0\0\0\0",
+		.src.addr_bytes = "\0\xc0\x01\xc0\xff\xee",
+#endif
+		.type = RTE_BE16(0x0800),
+	};
+	struct rte_flow_item_eth eth_mask = {
+#ifdef DST_FILTER
+		.dst.addr_bytes = "\xff\xff\xff\xff\xff\xff",
+		.src.addr_bytes = "\0\0\0\0\0\0",
+#else
+		.dst.addr_bytes = "\0\0\0\0\0\0",
+		.src.addr_bytes = "\xff\xff\xff\xff\xff\xff",
+#endif
+		.type = RTE_BE16(0x0000),
+	};
 	struct rte_flow_item pattern[] = {
 		{
 			.type = RTE_FLOW_ITEM_TYPE_ETH,
 			.spec = &eth_zero,
-			.mask = &eth_zero,
+			.mask = &eth_mask,
 		},
 		{ .type = RTE_FLOW_ITEM_TYPE_END },
 	};
@@ -126,11 +146,11 @@ static void flow_configure(uint16_t portid, uint16_t nq __rte_unused)
 	struct rte_flow_action_rss act_rss = {
 		.types = VNIC_RSS_HASH_TYPES,
 		.queue_num = nq,
-		.queue = vnic_queues,
+		.queue = rss_queues,
 	};
 #else
 	struct rte_flow_action_queue act_queue = {
-		.index = 0,
+		.index = nq/nq, /* helps avoid __rte_unused */
 	};
 #endif
 	struct rte_flow_action actions[] = {
@@ -152,10 +172,21 @@ static void flow_configure(uint16_t portid, uint16_t nq __rte_unused)
 
 #ifdef RSS_WORKS
 	unsigned int i;
-	for (i = 0; i < nq; i++)
-		vnic_queues[i] = i;
+	/* We do not want to use RxQ 0 for filters. */
+	for (i = 1; i < 5; i++)
+		rss_queues[i-1] = i;
 #endif
 
+#ifdef DST_FILTER
+	printf("flow-demo: Creating Destination MAC filter!!\n");
+#else
+	printf("flow-demo: Creating Source MAC filter!!\n");
+#endif
+#ifdef RSS_WORKS
+	printf("flow-demo: Creating MAC filter with RSS action!!\n");
+#else
+	printf("flow-demo: Creating MAC filter with QUEUE action!!\n");
+#endif
 	r = rte_flow_validate(portid, &attr, pattern, actions, &err);
 	if (r < 0)
 		rte_exit(EXIT_FAILURE,
@@ -166,6 +197,12 @@ static void flow_configure(uint16_t portid, uint16_t nq __rte_unused)
 		rte_exit(EXIT_FAILURE,
 			 "flow create failed: %s\n error type %u %s\n",
 			 rte_strerror(rte_errno), err.type, err.message);
+#ifdef RSS_WORKS
+	for (i = 1; i < 5; i++)
+		r = rte_eth_dev_rx_queue_start(portid, i);
+#else
+	r = rte_eth_dev_rx_queue_start(portid, nq/nq);
+#endif
 }
 
 static int
@@ -179,7 +216,7 @@ dump_rx_pkt(void *dummy __rte_unused)
 
 		n = rte_eth_rx_burst(0, q, pkts, MAX_PKT_BURST);
 		if (n == 0) {
-			sleep(10);
+			sleep(1);
 			continue;
 		}
 
