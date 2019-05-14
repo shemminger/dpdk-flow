@@ -3,27 +3,51 @@
  * Copyright(c) 2019 Microsoft Corporation
  * All rights reserved.
  *
+ * Creates multiple virtual network interfaces each with a
+ * unique MAC address.
+ *
+ * Usage:
+ *    flow-demo EAL_args -- [--validate] [--queues Q] [--dst] MAC...
+ *
  */
 
 #include <stdio.h>
+#include <stdbool.h>
+#include <signal.h>
 #include <unistd.h>
+#include <getopt.h>
 
 #include <rte_ethdev.h>
 #include <rte_mbuf.h>
 #include <rte_flow.h>
 
-#define NUM_MBUFS 131071
-#define MEMPOOL_CACHE 256
-#define MAX_QUEUES 64
+/* steal ether_aton fron netinet/ether.h */
+struct ether_addr *ether_aton_r(const char *asc, struct ether_addr *addr);
+char *ether_ntoa_r(const struct ether_addr *addr, char *buf);
+
+static unsigned int num_vnic;
+static struct ether_addr *vnic_mac;
+static unsigned int num_queue = 1;
+static bool validate = false;
+static bool match_dst = false;
+static volatile bool force_quit;
+
+#define NUM_MBUFS	   131071
+#define MEMPOOL_CACHE	   256
 #define RX_DESC_DEFAULT	   256
 #define TX_DESC_DEFAULT	   512
-#define MAX_PKT_BURST 32
-//#define RSS_WORKS	1
-#define DST_FILTER	1
+#define MAX_PKT_BURST	   32
+#define MAX_RX_QUEUE	   64
 
 #define VNIC_RSS_HASH_TYPES \
 	(ETH_RSS_IPV4 | ETH_RSS_NONFRAG_IPV4_TCP | ETH_RSS_NONFRAG_IPV4_UDP | \
 	 ETH_RSS_IPV6 | ETH_RSS_NONFRAG_IPV6_TCP | ETH_RSS_NONFRAG_IPV6_UDP)
+
+struct lcore_queue_conf {
+	uint16_t n_rx;
+	uint16_t rx_queues[MAX_RX_QUEUE];
+}  __rte_cache_aligned;
+static struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 
 static struct rte_mempool *mb_pool;
 
@@ -44,12 +68,11 @@ static const struct rte_eth_conf port_conf = {
 };
 
 
-static void port_config(uint16_t portid)
+static void port_config(uint16_t portid, uint16_t ntxq, uint16_t nrxq)
 {
 	struct rte_eth_dev_info dev_info;
 	struct rte_eth_txconf txq_conf;
 	struct rte_eth_rxconf rxq_conf;
-	uint16_t nrxq, ntxq;
 	uint16_t nb_rxd = RX_DESC_DEFAULT;
 	uint16_t nb_txd = TX_DESC_DEFAULT;
 	uint16_t q;
@@ -57,9 +80,17 @@ static void port_config(uint16_t portid)
 
 	rte_eth_dev_info_get(portid, &dev_info);
 
-	nrxq = RTE_MIN(MAX_QUEUES, dev_info.max_rx_queues);
-	ntxq = rte_lcore_count();
+	if (ntxq > dev_info.max_tx_queues)
+		rte_exit(EXIT_FAILURE,
+			 "Not enough transmit queues %u > %u\n",
+			ntxq, dev_info.max_tx_queues);
 
+	if (nrxq > dev_info.max_rx_queues)
+		rte_exit(EXIT_FAILURE,
+			 "Not enough receive queues %u > %u\n",
+			nrxq, dev_info.max_rx_queues);
+
+	printf("Configure %u Tx and %u Rx queues\n", ntxq, nrxq);
 	r = rte_eth_dev_configure(portid, nrxq, ntxq, &port_conf);
 	if (r < 0)
 		rte_exit(EXIT_FAILURE,
@@ -76,8 +107,6 @@ static void port_config(uint16_t portid)
 	rxq_conf = dev_info.default_rxconf;
 
 	txq_conf.offloads = port_conf.txmode.offloads;
-	rxq_conf.rx_drop_en = 1;
-	//rxq_conf.rx_deferred_start = 1;
 	rxq_conf.offloads = port_conf.rxmode.offloads;
 
 	for (q = 0; q < ntxq; q++) {
@@ -96,145 +125,168 @@ static void port_config(uint16_t portid)
 				 "rte_eth_rx_queue_setup failed %d\n",
 				 r);
 	}
-	rte_eth_dev_start(portid);
 
-	for (q = 1; q < nrxq; q++)
+	r = rte_eth_dev_start(portid);
+	if (r < 0)
+		rte_exit(EXIT_FAILURE,
+			 "Start failed: err=%d\n", r);
+
+	/* Stop all VNIC queues */
+	for (q = 1; q < nrxq; q++) {
 		r = rte_eth_dev_rx_queue_stop(portid, q);
+		if (r < 0)
+			rte_exit(EXIT_FAILURE, "queue %u stop failed\n",
+				q);
+	}
 }
 
-static void flow_configure(uint16_t portid, uint16_t nq)
+static const struct rte_flow_item_eth eth_dst_mask = {
+	.dst.addr_bytes = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff },
+};
+static const struct rte_flow_item_eth eth_src_mask = {
+	.src.addr_bytes = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff },
+};
+
+static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
 {
 	/* flow only applies to ingress */
 	struct rte_flow_attr attr  = {
 		.ingress = 1,
-#ifdef DST_FILTER
-		//.priority = 65536,
-#endif
-		.group = 16,
 	};
-	struct rte_flow_item_eth eth_zero = {
-#ifdef DST_FILTER
-		//.dst.addr_bytes = "\0\xc0\x1d\xc0\xff\xee",
-		.dst.addr_bytes = "\0\xc0\xff\xee\xbe\x11",
-		.src.addr_bytes = "\0\0\0\0\0\0",
-#else
-		.dst.addr_bytes = "\0\0\0\0\0\0",
-		.src.addr_bytes = "\0\xc0\x01\xc0\xff\xee",
-#endif
-		.type = RTE_BE16(0x0800),
-	};
-	struct rte_flow_item_eth eth_mask = {
-#ifdef DST_FILTER
-		.dst.addr_bytes = "\xff\xff\xff\xff\xff\xff",
-		.src.addr_bytes = "\0\0\0\0\0\0",
-#else
-		.dst.addr_bytes = "\0\0\0\0\0\0",
-		.src.addr_bytes = "\xff\xff\xff\xff\xff\xff",
-#endif
-		.type = RTE_BE16(0x0000),
-	};
+	struct rte_flow_item_eth match_mac = { };
 	struct rte_flow_item pattern[] = {
 		{
 			.type = RTE_FLOW_ITEM_TYPE_ETH,
-			.spec = &eth_zero,
-			.mask = &eth_mask,
+			.spec = &match_mac,
 		},
 		{ .type = RTE_FLOW_ITEM_TYPE_END },
 	};
-#ifdef RSS_WORKS
-	uint16_t rss_queues[nq];
-	struct rte_flow_action_rss act_rss = {
-		.types = VNIC_RSS_HASH_TYPES,
-		.queue_num = nq,
-		.queue = rss_queues,
-	};
-#else
-	struct rte_flow_action_queue act_queue = {
-		.index = nq/nq, /* helps avoid __rte_unused */
-	};
-#endif
+	uint16_t rss_queues[num_queue];
+	union {
+		struct rte_flow_action_rss rss;
+		struct rte_flow_action_queue queue;
+	} action;
 	struct rte_flow_action actions[] = {
-#ifdef RSS_WORKS
-		{
-			.type = RTE_FLOW_ACTION_TYPE_RSS,
-			.conf = &act_rss,
-		},
-#else
-		{
-			.type = RTE_FLOW_ACTION_TYPE_QUEUE,
-			.conf = &act_queue,
-		},
-#endif
+		{ .type = RTE_FLOW_ACTION_TYPE_VOID },
 		{ .type = RTE_FLOW_ACTION_TYPE_END  },
 	};
 	struct rte_flow_error err;
+	uint16_t q;
 	int r;
 
-#ifdef RSS_WORKS
-	unsigned int i;
-	/* We do not want to use RxQ 0 for filters. */
-	for (i = 1; i < 5; i++)
-		rss_queues[i-1] = i;
-#endif
+	printf("Creating VNIC %u with queue %u..%u\n",
+		id, firstq, firstq + num_queue -1);
 
-#ifdef DST_FILTER
-	printf("flow-demo: Creating Destination MAC filter!!\n");
-#else
-	printf("flow-demo: Creating Source MAC filter!!\n");
-#endif
-#ifdef RSS_WORKS
-	printf("flow-demo: Creating MAC filter with RSS action!!\n");
-#else
-	printf("flow-demo: Creating MAC filter with QUEUE action!!\n");
-#endif
-	r = rte_flow_validate(portid, &attr, pattern, actions, &err);
-	if (r < 0)
-		rte_exit(EXIT_FAILURE,
-			 "flow validate failed: %s\n error type %u %s\n",
-			 rte_strerror(rte_errno), err.type, err.message);
+	if (match_dst) {
+		pattern[0].mask = &eth_dst_mask;
+		match_mac.dst = vnic_mac[id];
+	} else {
+		pattern[0].mask = &eth_src_mask;
+		match_mac.src = vnic_mac[id];
+	}
 
+	if (num_queue > 1) {
+		uint16_t i;
+
+		for (i = 0; i < num_queue; i++)
+			rss_queues[i] = firstq + i;
+
+		action.rss = (struct rte_flow_action_rss) {
+			.types = VNIC_RSS_HASH_TYPES,
+			.queue_num = num_queue,
+			.queue = rss_queues,
+		};
+		actions[0] = (struct rte_flow_action) {
+			.type = RTE_FLOW_ACTION_TYPE_RSS,
+			.conf = &action.rss,
+		};
+	} else {
+		action.queue.index = firstq;
+		actions[0] = (struct rte_flow_action) {
+			.type = RTE_FLOW_ACTION_TYPE_QUEUE,
+			.conf = &action.queue,
+		};
+	}
+
+	if (validate) {
+		printf("flow-demo: Validating MAC filter\n");
+		r = rte_flow_validate(portid, &attr, pattern, actions, &err);
+		if (r < 0)
+			rte_exit(EXIT_FAILURE,
+				 "flow validate failed: %s\n error type %u %s\n",
+				 rte_strerror(rte_errno), err.type, err.message);
+	}
+
+	printf("flow-demo: Creating MAC filter!!\n");
 	if (rte_flow_create(portid, &attr, pattern, actions, &err) == NULL)
 		rte_exit(EXIT_FAILURE,
 			 "flow create failed: %s\n error type %u %s\n",
 			 rte_strerror(rte_errno), err.type, err.message);
-#ifdef RSS_WORKS
-	for (i = 1; i < 5; i++)
-		r = rte_eth_dev_rx_queue_start(portid, i);
-#else
-	r = rte_eth_dev_rx_queue_start(portid, nq/nq);
-#endif
+
+	printf("flow-demo: Starting queues\n");
+	for (q = firstq; q < num_queue; q++) {
+		r = rte_eth_dev_rx_queue_start(portid, q);
+		if (r < 0)
+			rte_exit(EXIT_FAILURE,
+				 "rte_eth_dev_rx_queue_start: q=%u failed\n", q);
+	}
+}
+
+static void
+dump_rx_pkt(uint16_t q, struct rte_mbuf *pkts[], uint16_t n)
+{
+	uint16_t i;
+
+	for (i = 0; i < n; i++) {
+		struct rte_mbuf *m = pkts[i];
+		const struct ether_hdr *eh
+			= rte_pktmbuf_mtod(m, struct ether_hdr *);
+		char dbuf[ETHER_ADDR_FMT_SIZE], sbuf[ETHER_ADDR_FMT_SIZE];
+
+		printf("[%u] %s %s %x ..%u\n", q,
+		       ether_ntoa_r(&eh->d_addr, dbuf),
+		       ether_ntoa_r(&eh->s_addr, sbuf),
+		       ntohs(eh->ether_type), rte_pktmbuf_pkt_len(m));
+
+		rte_pktmbuf_free(m);
+	}
 }
 
 static int
-dump_rx_pkt(void *dummy __rte_unused)
+rx_thread(void *arg __rte_unused)
 {
-	uint16_t q = rte_lcore_id();
+	unsigned int core_id = rte_lcore_id();
+	const struct lcore_queue_conf *c = &lcore_queue_conf[core_id];
+	uint16_t i, n;
 
-	for(;;) {
-		struct rte_mbuf *pkts[MAX_PKT_BURST];
-		uint16_t i, n;
-
-		n = rte_eth_rx_burst(0, q, pkts, MAX_PKT_BURST);
-		if (n == 0) {
-			sleep(1);
-			continue;
-		}
-
-		for (i = 0; i < n; i++) {
-			struct rte_mbuf *m = pkts[i];
-			const struct ether_hdr *eh;
-			char dst[ETHER_ADDR_FMT_SIZE], src[ETHER_ADDR_FMT_SIZE];
-
-			eh = rte_pktmbuf_mtod(m, struct ether_hdr *);
-			ether_format_addr(src, sizeof(src), &eh->s_addr);
-			ether_format_addr(dst, sizeof(dst), &eh->d_addr);
-			printf("[%u] %s %s %x ..%u\n",
-			       q, dst, src, ntohs(eh->ether_type),
-			       rte_pktmbuf_pkt_len(m));
-			rte_pktmbuf_free(m);
-		}
+	if (c->n_rx == 0) {
+		printf("Lcore %u has nothing to do\n", rte_lcore_id());
+		return 0;
 	}
 
+	for (i = 0; i < c->n_rx; i++) {
+		printf("Lcore %u is polling on queue %u\n",
+			core_id, c->rx_queues[i]);
+	}
+	fflush(stdout);
+
+	while (!force_quit) {
+		uint16_t t = 0;
+
+		for (i = 0; i < c->n_rx; i++) {
+			struct rte_mbuf *pkts[MAX_PKT_BURST];
+			uint16_t q = c->rx_queues[i];
+
+			n = rte_eth_rx_burst(0, q, pkts, MAX_PKT_BURST);
+			t += n;
+			dump_rx_pkt(q, pkts, n);
+		}
+		fflush(stdout);
+
+		if (t == 0)
+			sleep(1);
+
+	}
 	return 0;
 }
 
@@ -248,16 +300,86 @@ static void print_mac(uint16_t portid)
 	printf("Initialized port %u: MAC: %s\n", portid, buf);
 }
 
+static const struct option long_opts[] = {
+	{ "validate",	no_argument,	   NULL, 'v' },
+	{ "queues",	required_argument, NULL, 'q' },
+	{ "dst",	no_argument,       NULL, 'd' },
+};
+
+static void usage(const char *argv0)
+{
+	printf("Usage: %s [EAL options] -- -v -d -q NQ MAC1 MAC2 ...\n"
+	       "  -v  validate flow\n"
+	       "  -d  match on destination mac\n"
+	       "  -q  NQ  number of queues per Vnic\n", argv0);
+	exit(1);
+}
+
+static void parse_args(int argc, char **argv)
+{
+	int opt, opt_idx;
+	unsigned int i;
+
+	while ((opt = getopt_long(argc, argv, "vdq:",
+				  long_opts, &opt_idx)) != EOF) {
+		switch (opt) {
+		case 'q':
+			num_queue = atoi(optarg);
+			break;
+		case 'v':
+			validate = true;
+			break;
+		case 'd':
+			match_dst = true;
+			break;
+		case  0:
+			break;
+		default:
+			usage(argv[0]);
+		}
+	}
+
+	/* Additional arguments are MAC address of VNICs */
+	num_vnic = argc - optind;
+	vnic_mac = calloc(sizeof(struct ether_addr), num_vnic);
+
+	for (i = 0; i < num_vnic; i++) {
+		const char *asc = argv[optind + i];
+
+		if (ether_aton_r(asc, vnic_mac + i) == NULL)
+			rte_exit(EXIT_FAILURE,
+				"Invalid mac address: %s\n", asc);
+	}
+}
+
+static void signal_handler(int signum)
+{
+	if (signum == SIGINT || signum == SIGTERM) {
+		printf("\n\nSignal %d received, preparing to exit...\n",
+				signum);
+		force_quit = true;
+	}
+}
+
+
 int main(int argc, char **argv)
 {
-	unsigned int n;
-	uint16_t portid;
+	unsigned int q, v, n;
+	uint16_t ntxq, nrxq;
 	int r;
 
 	r = rte_eal_init(argc, argv);
 	if (r < 0)
 		rte_exit(EXIT_FAILURE, "Invalid EAL arguments\n");
 
+	parse_args(argc - r, argv + r);
+
+	ntxq = rte_lcore_count();
+	nrxq = num_vnic * num_queue + 1;
+
+	force_quit = false;
+	signal(SIGINT, signal_handler);
+	signal(SIGTERM, signal_handler);
 
 	n = rte_eth_dev_count_avail();
 	if (n != 1)
@@ -269,31 +391,31 @@ int main(int argc, char **argv)
 	if (!mb_pool)
 		rte_exit(EXIT_FAILURE, "Cannot init mbuf pool\n");
 
-	RTE_ETH_FOREACH_DEV(portid) {
-		port_config(portid);
+	port_config(0, ntxq, nrxq);
+	print_mac(0);
+	rte_eth_promiscuous_enable(0);
 
-		print_mac(portid);
+	for (v = 0, q = 1; v < num_vnic; v++, q += num_queue)
+		flow_configure(0, v, q);
 
-		rte_eth_promiscuous_enable(portid);
+	for (q = 0; q < nrxq; q++) {
+		unsigned int lcore = q % rte_lcore_count();
+		struct lcore_queue_conf *c = &lcore_queue_conf[lcore];
 
-		flow_configure(portid,
-			       rte_lcore_count());
-
-		r = rte_eth_dev_start(portid);
-		if (r < 0)
+		if (c->n_rx >= MAX_RX_QUEUE)
 			rte_exit(EXIT_FAILURE,
-				 "Start failed: err=%d, port=%u\n",
-				 r, portid);
+				"Too many rx queue already on core %u\n",
+				lcore);
+
+		c->rx_queues[c->n_rx++] = q;
 	}
 
-	r = rte_eal_mp_remote_launch(dump_rx_pkt, NULL, CALL_MASTER);
+	r = rte_eal_mp_remote_launch(rx_thread, NULL, CALL_MASTER);
 	if (r < 0)
 		rte_exit(EXIT_FAILURE, "cannot launch cores");
 
-	RTE_ETH_FOREACH_DEV(portid) {
-		rte_eth_dev_stop(portid);
-		rte_eth_dev_close(portid);
-	}
+	rte_eth_dev_stop(0);
+	rte_eth_dev_close(0);
 
 	return 0;
 }
