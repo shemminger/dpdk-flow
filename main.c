@@ -148,6 +148,10 @@ static const struct rte_flow_item_eth eth_dst_mask = {
 static const struct rte_flow_item_eth eth_src_mask = {
 	.src.addr_bytes = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff },
 };
+/* Match any level mask */
+struct rte_flow_item_any any_mask = {
+	.num = UINT32_MAX,
+};
 
 static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
 {
@@ -155,8 +159,16 @@ static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
 	struct rte_flow_attr attr  = {
 		.ingress = 1,
 	};
+	struct rte_flow_item_any inner = {
+		.num = 4,
+	};
 	struct rte_flow_item_eth match_mac = { };
 	struct rte_flow_item pattern[] = {
+		{
+			.type = RTE_FLOW_ITEM_TYPE_ANY,
+			.spec = &inner,
+			.mask = &any_mask,
+		},
 		{
 			.type = RTE_FLOW_ITEM_TYPE_ETH,
 			.spec = &match_mac,
@@ -180,10 +192,10 @@ static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
 		id, firstq, firstq + num_queue -1);
 
 	if (match_dst) {
-		pattern[0].mask = &eth_dst_mask;
+		pattern[1].mask = &eth_dst_mask;
 		match_mac.dst = vnic_mac[id];
 	} else {
-		pattern[0].mask = &eth_src_mask;
+		pattern[1].mask = &eth_src_mask;
 		match_mac.src = vnic_mac[id];
 	}
 
