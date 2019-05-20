@@ -21,6 +21,8 @@
 #include <rte_mbuf.h>
 #include <rte_flow.h>
 
+#include "rte_flow_dump.h"
+
 /* steal ether_aton fron netinet/ether.h */
 struct ether_addr *ether_aton_r(const char *asc, struct ether_addr *addr);
 char *ether_ntoa_r(const struct ether_addr *addr, char *buf);
@@ -207,6 +209,9 @@ static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
 			.conf = &action.queue,
 		};
 	}
+
+	rte_flow_dump(stdout, &attr, pattern, actions);
+	fflush(stdout);
 
 	if (validate) {
 		printf("flow-demo: Validating MAC filter\n");

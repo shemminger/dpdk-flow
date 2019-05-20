@@ -5,7 +5,8 @@
 APP = flow-demo
 
 # all source are stored in SRCS-y
-SRCS-y := main.c
+
+SRCS-y := main.c rte_flow_dump.c
 
 # Build using pkg-config variables if possible
 $(shell pkg-config --exists libdpdk)
