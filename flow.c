@@ -7,7 +7,7 @@
  * unique MAC address.
  *
  * Usage:
- *    flow-demo EAL_args -- [--validate] [--queues Q] [--dst] MAC...
+ *    flow-demo EAL_args -- [--queues Q]  MAC...
  *
  */
 
@@ -30,8 +30,6 @@ char *ether_ntoa_r(const struct ether_addr *addr, char *buf);
 static unsigned int num_vnic;
 static struct ether_addr *vnic_mac;
 static unsigned int num_queue = 1;
-static bool validate = false;
-static bool match_dst = false;
 static volatile bool force_quit;
 
 #define NUM_MBUFS	   131071
@@ -44,6 +42,9 @@ static volatile bool force_quit;
 #define VNIC_RSS_HASH_TYPES \
 	(ETH_RSS_IPV4 | ETH_RSS_NONFRAG_IPV4_TCP | ETH_RSS_NONFRAG_IPV4_UDP | \
 	 ETH_RSS_IPV6 | ETH_RSS_NONFRAG_IPV6_TCP | ETH_RSS_NONFRAG_IPV6_UDP)
+
+#define VNIC_SRC_MAC_PRIORITY	1
+#define VNIC_DST_MAC_PRIORITY	2
 
 struct lcore_queue_conf {
 	uint16_t n_rx;
@@ -141,40 +142,90 @@ static void port_config(uint16_t portid, uint16_t ntxq, uint16_t nrxq)
 				q);
 	}
 }
-
-static const struct rte_flow_item_eth eth_dst_mask = {
-	.dst.addr_bytes = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff },
-};
-static const struct rte_flow_item_eth eth_src_mask = {
-	.src.addr_bytes = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff },
-};
 /* Match any level mask */
-struct rte_flow_item_any any_mask = {
+static const struct rte_flow_item_any any_mask = {
 	.num = UINT32_MAX,
 };
 
-static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
+/* Match encaped packets */
+static const struct rte_flow_item_any inner_flow = {
+	.num = 4,
+};
+
+static struct rte_flow *
+flow_src_mac(uint16_t port, uint32_t id, const struct ether_addr *mac,
+	     const struct rte_flow_action actions[],
+	     struct rte_flow_error *err)
 {
-	/* flow only applies to ingress */
 	struct rte_flow_attr attr  = {
+		.group = id,
+		.priority = VNIC_SRC_MAC_PRIORITY,
 		.ingress = 1,
 	};
-	struct rte_flow_item_any inner = {
-		.num = 4,
+	static const struct rte_flow_item_eth eth_src_mask = {
+	      .src.addr_bytes = "\xff\xff\xff\xff\xff\xff",
 	};
-	struct rte_flow_item_eth match_mac = { };
+	struct rte_flow_item_eth vnic_eth_src = {
+		.src = *mac,
+	};
 	struct rte_flow_item pattern[] = {
 		{
 			.type = RTE_FLOW_ITEM_TYPE_ANY,
-			.spec = &inner,
+			.spec = &inner_flow,
 			.mask = &any_mask,
 		},
 		{
 			.type = RTE_FLOW_ITEM_TYPE_ETH,
-			.spec = &match_mac,
+			.spec = &vnic_eth_src,
+			.mask = &eth_src_mask,
 		},
 		{ .type = RTE_FLOW_ITEM_TYPE_END },
 	};
+
+	printf("flow-demo: Creating src MAC filter!!\n");
+	rte_flow_dump(stdout, &attr, pattern, actions);
+		      
+	return rte_flow_create(port, &attr, pattern, actions, err);
+}
+
+static struct rte_flow *
+flow_dst_mac(uint16_t port, uint32_t id, const struct ether_addr *mac,
+	     const struct rte_flow_action actions[],
+	     struct rte_flow_error *err)
+{
+	struct rte_flow_attr attr  = {
+		.group = id,
+		.priority = VNIC_DST_MAC_PRIORITY,
+		.ingress = 1,
+	};
+	struct rte_flow_item_eth vnic_eth_dst = {
+		.dst = *mac,
+	};
+	static const struct rte_flow_item_eth eth_dst_mask = {
+	      .dst.addr_bytes = "\xff\xff\xff\xff\xff\xff",
+	};
+	struct rte_flow_item pattern[] = {
+		{
+			.type = RTE_FLOW_ITEM_TYPE_ANY,
+			.spec = &inner_flow,
+			.mask = &any_mask,
+		},
+		{
+			.type = RTE_FLOW_ITEM_TYPE_ETH,
+			.spec = &vnic_eth_dst,
+			.mask = &eth_dst_mask,
+		},
+		{ .type = RTE_FLOW_ITEM_TYPE_END },
+	};
+
+	printf("flow-demo: Creating dst MAC filter!!\n");
+	rte_flow_dump(stdout, &attr, pattern, actions);
+	return rte_flow_create(port, &attr, pattern, actions, err);
+}
+
+static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
+{
+	const struct ether_addr *mac = &vnic_mac[id];
 	uint16_t rss_queues[num_queue];
 	union {
 		struct rte_flow_action_rss rss;
@@ -190,14 +241,6 @@ static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
 
 	printf("Creating VNIC %u with queue %u..%u\n",
 		id, firstq, firstq + num_queue -1);
-
-	if (match_dst) {
-		pattern[1].mask = &eth_dst_mask;
-		match_mac.dst = vnic_mac[id];
-	} else {
-		pattern[1].mask = &eth_src_mask;
-		match_mac.src = vnic_mac[id];
-	}
 
 	if (num_queue > 1) {
 		uint16_t i;
@@ -222,24 +265,17 @@ static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
 		};
 	}
 
-	rte_flow_dump(stdout, &attr, pattern, actions);
-	fflush(stdout);
-
-	if (validate) {
-		printf("flow-demo: Validating MAC filter\n");
-		r = rte_flow_validate(portid, &attr, pattern, actions, &err);
-		if (r < 0)
-			rte_exit(EXIT_FAILURE,
-				 "flow validate failed: %s\n error type %u %s\n",
-				 rte_strerror(rte_errno), err.type, err.message);
-	}
-
-	printf("flow-demo: Creating MAC filter!!\n");
-	if (rte_flow_create(portid, &attr, pattern, actions, &err) == NULL)
+	if (!flow_src_mac(portid, id, mac, actions, &err))
 		rte_exit(EXIT_FAILURE,
-			 "flow create failed: %s\n error type %u %s\n",
+			 "src mac flow create failed: %s\n error type %u %s\n",
 			 rte_strerror(rte_errno), err.type, err.message);
 
+	if (!flow_dst_mac(portid, id, mac, actions, &err))
+		rte_exit(EXIT_FAILURE,
+			 "dst mac flow create failed: %s\n error type %u %s\n",
+			 rte_strerror(rte_errno), err.type, err.message);
+
+	
 	printf("flow-demo: Starting queues\n");
 	for (q = firstq; q < num_queue; q++) {
 		r = rte_eth_dev_rx_queue_start(portid, q);
@@ -317,39 +353,22 @@ static void print_mac(uint16_t portid)
 	printf("Initialized port %u: MAC: %s\n", portid, buf);
 }
 
-static const struct option long_opts[] = {
-	{ "validate",	no_argument,	   NULL, 'v' },
-	{ "queues",	required_argument, NULL, 'q' },
-	{ "dst",	no_argument,       NULL, 'd' },
-};
-
 static void usage(const char *argv0)
 {
 	printf("Usage: %s [EAL options] -- -v -d -q NQ MAC1 MAC2 ...\n"
-	       "  -v  validate flow\n"
-	       "  -d  match on destination mac\n"
 	       "  -q  NQ  number of queues per Vnic\n", argv0);
 	exit(1);
 }
 
 static void parse_args(int argc, char **argv)
 {
-	int opt, opt_idx;
+	int opt;
 	unsigned int i;
 
-	while ((opt = getopt_long(argc, argv, "vdq:",
-				  long_opts, &opt_idx)) != EOF) {
+	while ((opt = getopt(argc, argv, "q:")) != EOF) {
 		switch (opt) {
 		case 'q':
 			num_queue = atoi(optarg);
-			break;
-		case 'v':
-			validate = true;
-			break;
-		case 'd':
-			match_dst = true;
-			break;
-		case  0:
 			break;
 		default:
 			usage(argv[0]);
