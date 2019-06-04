@@ -21,14 +21,14 @@
 #include <rte_mbuf.h>
 #include <rte_flow.h>
 
+#include "eth_compat.h"
 #include "rte_flow_dump.h"
 
 /* steal ether_aton fron netinet/ether.h */
 struct ether_addr *ether_aton_r(const char *asc, struct ether_addr *addr);
-char *ether_ntoa_r(const struct ether_addr *addr, char *buf);
 
 static unsigned int num_vnic;
-static struct ether_addr *vnic_mac;
+static struct rte_ether_addr *vnic_mac;
 static unsigned int num_queue = 1;
 static volatile bool force_quit;
 
@@ -62,7 +62,7 @@ static struct rte_mempool *mb_pool;
 static const struct rte_eth_conf port_conf = {
 	.rxmode = {
 		.mq_mode	= ETH_MQ_RX_NONE,
-		.max_rx_pkt_len = ETHER_MAX_LEN,
+		.max_rx_pkt_len = RTE_ETHER_MAX_LEN,
 		.offloads	= DEV_RX_OFFLOAD_VLAN_STRIP
 				| DEV_RX_OFFLOAD_CHECKSUM,
 	},
@@ -158,7 +158,8 @@ static const struct rte_flow_item_any inner_flow = {
 };
 
 static struct rte_flow *
-flow_src_mac(uint16_t port, uint32_t id, const struct ether_addr *mac,
+flow_src_mac(uint16_t port, uint32_t id,
+	     const struct rte_ether_addr *mac,
 	     const struct rte_flow_action actions[],
 	     struct rte_flow_error *err)
 {
@@ -189,12 +190,13 @@ flow_src_mac(uint16_t port, uint32_t id, const struct ether_addr *mac,
 
 	printf("flow-demo: Creating src MAC filter!!\n");
 	rte_flow_dump(stdout, &attr, pattern, actions);
-		      
+
 	return rte_flow_create(port, &attr, pattern, actions, err);
 }
 
 static struct rte_flow *
-flow_dst_mac(uint16_t port, uint32_t id, const struct ether_addr *mac,
+flow_dst_mac(uint16_t port, uint32_t id,
+	     const struct rte_ether_addr *mac,
 	     const struct rte_flow_action actions[],
 	     struct rte_flow_error *err)
 {
@@ -230,7 +232,7 @@ flow_dst_mac(uint16_t port, uint32_t id, const struct ether_addr *mac,
 
 static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
 {
-	const struct ether_addr *mac = &vnic_mac[id];
+	const struct rte_ether_addr *mac = &vnic_mac[id];
 	uint16_t rss_queues[num_queue];
 	union {
 		struct rte_flow_action_rss rss;
@@ -298,13 +300,17 @@ dump_rx_pkt(uint16_t q, struct rte_mbuf *pkts[], uint16_t n)
 
 	for (i = 0; i < n; i++) {
 		struct rte_mbuf *m = pkts[i];
-		const struct ether_hdr *eh
-			= rte_pktmbuf_mtod(m, struct ether_hdr *);
-		char dbuf[ETHER_ADDR_FMT_SIZE], sbuf[ETHER_ADDR_FMT_SIZE];
+		const struct rte_ether_hdr *eh
+			= rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
+		char dbuf[RTE_ETHER_ADDR_FMT_SIZE];
+		char sbuf[RTE_ETHER_ADDR_FMT_SIZE];
 
-		printf("[%u] %s %s %x ..%u\n", q,
-		       ether_ntoa_r(&eh->d_addr, dbuf),
-		       ether_ntoa_r(&eh->s_addr, sbuf),
+		rte_ether_format_addr(dbuf, RTE_ETHER_ADDR_FMT_SIZE,
+				      &eh->d_addr);
+		rte_ether_format_addr(sbuf, RTE_ETHER_ADDR_FMT_SIZE,
+				      &eh->s_addr);
+
+		printf("[%u] %s %s %x ..%u\n", q, dbuf, sbuf,
 		       ntohs(eh->ether_type), rte_pktmbuf_pkt_len(m));
 
 		rte_pktmbuf_free(m);
@@ -351,11 +357,12 @@ rx_thread(void *arg __rte_unused)
 
 static void print_mac(uint16_t portid)
 {
-	struct ether_addr eth_addr;
-	char buf[ETHER_ADDR_FMT_SIZE];
+	struct rte_ether_addr eth_addr;
+	char buf[RTE_ETHER_ADDR_FMT_SIZE];
 
 	rte_eth_macaddr_get(portid, &eth_addr);
-	ether_format_addr(buf, sizeof(buf), &eth_addr);
+	rte_ether_format_addr(buf, sizeof(buf), &eth_addr);
+
 	printf("Initialized port %u: MAC: %s\n", portid, buf);
 }
 
@@ -392,12 +399,12 @@ static void parse_args(int argc, char **argv)
 
 	/* Additional arguments are MAC address of VNICs */
 	num_vnic = argc - optind;
-	vnic_mac = calloc(sizeof(struct ether_addr), num_vnic);
+	vnic_mac = calloc(sizeof(struct rte_ether_addr), num_vnic);
 
 	for (i = 0; i < num_vnic; i++) {
 		const char *asc = argv[optind + i];
 
-		if (ether_aton_r(asc, vnic_mac + i) == NULL)
+		if (ether_aton_r(asc, (struct ether_addr *)(vnic_mac + i)) == NULL)
 			rte_exit(EXIT_FAILURE,
 				"Invalid mac address: %s\n", asc);
 	}

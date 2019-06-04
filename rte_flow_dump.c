@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <rte_flow.h>
 
+#include "eth_compat.h"
 #include "rte_flow_dump.h"
 
 void
@@ -73,14 +74,14 @@ static void
 flow_item_eth_dump(FILE *f, const char *prefix,
 		   const struct rte_flow_item_eth *e)
 {
-	char b1[ETHER_ADDR_FMT_SIZE];
-	char b2[ETHER_ADDR_FMT_SIZE];
+	char b1[RTE_ETHER_ADDR_FMT_SIZE];
+	char b2[RTE_ETHER_ADDR_FMT_SIZE];
 
 	if (!e)
 		return;
 
-	ether_format_addr(b1, sizeof(b1), &e->dst);
-	ether_format_addr(b2, sizeof(b2), &e->src);
+	rte_ether_format_addr(b1, sizeof(b1), &e->dst);
+	rte_ether_format_addr(b2, sizeof(b2), &e->src);
 	fprintf(f, "\t  %s dst %s src %s type %u\n",
 		prefix, b1, b2, ntohs(e->type));
 }
