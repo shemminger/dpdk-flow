@@ -39,6 +39,11 @@ static volatile bool force_quit;
 #define MAX_PKT_BURST	   32
 #define MAX_RX_QUEUE	   64
 
+#define FLOW_SRC_MODE	1
+#define FLOW_DST_MODE	2
+
+static unsigned long flow_mode = FLOW_SRC_MODE | FLOW_DST_MODE;
+
 #define VNIC_RSS_HASH_TYPES \
 	(ETH_RSS_IPV4 | ETH_RSS_NONFRAG_IPV4_TCP | ETH_RSS_NONFRAG_IPV4_UDP | \
 	 ETH_RSS_IPV6 | ETH_RSS_NONFRAG_IPV6_TCP | ETH_RSS_NONFRAG_IPV6_UDP)
@@ -265,17 +270,18 @@ static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
 		};
 	}
 
-	if (!flow_src_mac(portid, id, mac, actions, &err))
+	if ((flow_mode & FLOW_SRC_MODE) &&
+	    !flow_src_mac(portid, id, mac, actions, &err))
 		rte_exit(EXIT_FAILURE,
 			 "src mac flow create failed: %s\n error type %u %s\n",
 			 rte_strerror(rte_errno), err.type, err.message);
 
-	if (!flow_dst_mac(portid, id, mac, actions, &err))
+	if ((flow_mode & FLOW_DST_MODE) &&
+	    !flow_dst_mac(portid, id, mac, actions, &err))
 		rte_exit(EXIT_FAILURE,
 			 "dst mac flow create failed: %s\n error type %u %s\n",
 			 rte_strerror(rte_errno), err.type, err.message);
 
-	
 	printf("flow-demo: Starting queues\n");
 	for (q = firstq; q < num_queue; q++) {
 		r = rte_eth_dev_rx_queue_start(portid, q);
@@ -355,8 +361,11 @@ static void print_mac(uint16_t portid)
 
 static void usage(const char *argv0)
 {
-	printf("Usage: %s [EAL options] -- -v -d -q NQ MAC1 MAC2 ...\n"
-	       "  -q  NQ  number of queues per Vnic\n", argv0);
+	printf("Usage: %s [EAL options] -- -d -s -q NQ MAC1 MAC2 ...\n"
+	       "  -d      destination mac only match\n"
+	       "  -s      source mac only match\n"
+	       "  -q  NQ  number of queues per Vnic\n",
+	       argv0);
 	exit(1);
 }
 
@@ -365,8 +374,14 @@ static void parse_args(int argc, char **argv)
 	int opt;
 	unsigned int i;
 
-	while ((opt = getopt(argc, argv, "q:")) != EOF) {
+	while ((opt = getopt(argc, argv, "sdq:")) != EOF) {
 		switch (opt) {
+		case 's':
+			flow_mode = FLOW_SRC_MODE;
+			break;
+		case 'd':
+			flow_mode = FLOW_DST_MODE;
+			break;
 		case 'q':
 			num_queue = atoi(optarg);
 			break;
