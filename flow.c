@@ -20,6 +20,7 @@
 #include <rte_ethdev.h>
 #include <rte_mbuf.h>
 #include <rte_flow.h>
+#include <rte_lcore.h>
 
 #include "eth_compat.h"
 #include "rte_flow_dump.h"
@@ -30,7 +31,6 @@ struct ether_addr *ether_aton_r(const char *asc, struct ether_addr *addr);
 static unsigned int num_vnic;
 static struct rte_ether_addr *vnic_mac;
 static unsigned int num_queue = 1;
-static volatile bool force_quit;
 
 #define NUM_MBUFS	   131071
 #define MEMPOOL_CACHE	   256
@@ -38,10 +38,16 @@ static volatile bool force_quit;
 #define TX_DESC_DEFAULT	   512
 #define MAX_PKT_BURST	   32
 #define MAX_RX_QUEUE	   64
+#define IDLE_POLL_US	   10
+#define US_PER_SEC	   1000000ul
+#define MAX_EVENTS	   16
+#define TIMEOUT_MS	   10000
 
 #define FLOW_SRC_MODE	1
 #define FLOW_DST_MODE	2
 
+static bool verbose = false;
+static bool irq_mode = false;
 static unsigned long flow_mode = FLOW_SRC_MODE | FLOW_DST_MODE;
 
 #define VNIC_RSS_HASH_TYPES \
@@ -51,11 +57,14 @@ static unsigned long flow_mode = FLOW_SRC_MODE | FLOW_DST_MODE;
 #define VNIC_SRC_MAC_PRIORITY	1
 #define VNIC_DST_MAC_PRIORITY	2
 
-struct lcore_queue_conf {
+struct lcore_conf {
 	uint16_t n_rx;
-	uint16_t rx_queues[MAX_RX_QUEUE];
+	struct rx_queue {
+		uint16_t port_id;
+		uint16_t queue_id;
+	} rx_queue_list[MAX_RX_QUEUE];
 }  __rte_cache_aligned;
-static struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
+static struct lcore_conf lcore_conf[RTE_MAX_LCORE];
 
 static struct rte_mempool *mb_pool;
 
@@ -75,6 +84,8 @@ static const struct rte_eth_conf port_conf = {
 	},
 };
 
+static volatile bool running = true;
+static uint64_t poll_interval;	/* cycles */
 
 static void port_config(uint16_t portid, uint16_t ntxq, uint16_t nrxq)
 {
@@ -188,8 +199,10 @@ flow_src_mac(uint16_t port, uint32_t id,
 		{ .type = RTE_FLOW_ITEM_TYPE_END },
 	};
 
-	printf("flow-demo: Creating src MAC filter!!\n");
-	rte_flow_dump(stdout, &attr, pattern, actions);
+	if (verbose) {
+		printf("flow-demo: Creating src MAC filter!!\n");
+		rte_flow_dump(stdout, &attr, pattern, actions);
+	}
 
 	return rte_flow_create(port, &attr, pattern, actions, err);
 }
@@ -225,14 +238,17 @@ flow_dst_mac(uint16_t port, uint32_t id,
 		{ .type = RTE_FLOW_ITEM_TYPE_END },
 	};
 
-	printf("flow-demo: Creating dst MAC filter!!\n");
-	rte_flow_dump(stdout, &attr, pattern, actions);
+	if (verbose) {
+		printf("flow-demo: Creating dst MAC filter!!\n");
+		rte_flow_dump(stdout, &attr, pattern, actions);
+	}
 	return rte_flow_create(port, &attr, pattern, actions, err);
 }
 
 static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
 {
 	const struct rte_ether_addr *mac = &vnic_mac[id];
+	uint16_t lastq = firstq + num_queue - 1;
 	uint16_t rss_queues[num_queue];
 	union {
 		struct rte_flow_action_rss rss;
@@ -247,7 +263,7 @@ static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
 	int r;
 
 	printf("Creating VNIC %u with queue %u..%u\n",
-		id, firstq, firstq + num_queue -1);
+	       id, firstq, lastq);
 
 	if (num_queue > 1) {
 		uint16_t i;
@@ -284,8 +300,7 @@ static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
 			 "dst mac flow create failed: %s\n error type %u %s\n",
 			 rte_strerror(rte_errno), err.type, err.message);
 
-	printf("flow-demo: Starting queues\n");
-	for (q = firstq; q < num_queue; q++) {
+	for (q = firstq; q <= lastq; q++) {
 		r = rte_eth_dev_rx_queue_start(portid, q);
 		if (r < 0)
 			rte_exit(EXIT_FAILURE,
@@ -294,7 +309,8 @@ static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
 }
 
 static void
-dump_rx_pkt(uint16_t q, struct rte_mbuf *pkts[], uint16_t n)
+dump_rx_pkt(uint16_t portid, uint16_t queueid,
+	    struct rte_mbuf *pkts[], uint16_t n)
 {
 	uint16_t i;
 
@@ -310,10 +326,105 @@ dump_rx_pkt(uint16_t q, struct rte_mbuf *pkts[], uint16_t n)
 		rte_ether_format_addr(sbuf, RTE_ETHER_ADDR_FMT_SIZE,
 				      &eh->s_addr);
 
-		printf("[%u] %s %s %x ..%u\n", q, dbuf, sbuf,
+		printf("[%u:%u] %s %s %x ..%u\n", portid, queueid,
+		       dbuf, sbuf,
 		       ntohs(eh->ether_type), rte_pktmbuf_pkt_len(m));
 
 		rte_pktmbuf_free(m);
+	}
+}
+
+static unsigned int
+rx_poll(uint16_t portid, uint16_t queueid)
+{
+	struct rte_mbuf *pkts[MAX_PKT_BURST];
+	unsigned int n;
+
+	n = rte_eth_rx_burst(portid, queueid, pkts, MAX_PKT_BURST);
+	if (n > 0) {
+		dump_rx_pkt(portid, queueid, pkts, n);
+		fflush(stdout);
+	}
+	return n;
+}
+
+/* enable interrupts on all queues this lcore is handling */
+static void
+enable_rx_intr(const struct lcore_conf *c)
+{
+	uint16_t i;
+	
+	for (i = 0; i < c->n_rx; i++) {
+		rte_eth_dev_rx_intr_enable(c->rx_queue_list[i].port_id,
+					   c->rx_queue_list[i].queue_id);
+	}
+}
+
+static void
+disable_rx_intr(const struct lcore_conf *c)
+{
+	uint16_t i;
+	
+	for (i = 0; i < c->n_rx; i++) {
+		rte_eth_dev_rx_intr_disable(c->rx_queue_list[i].port_id,
+					    c->rx_queue_list[i].queue_id);
+	}
+}
+
+static void
+sleep_until_interrupt(const struct lcore_conf *c)
+{
+	struct rte_epoll_event events[MAX_EVENTS];
+	int i, n;
+
+	enable_rx_intr(c);
+
+	for (i = 0; i < c->n_rx; i++) {
+		uint16_t port_id = c->rx_queue_list[i].port_id;
+		uint16_t queueid = c->rx_queue_list[i].queue_id;
+
+		/* make sure no packets still pending */
+		if (rx_poll(port_id, queueid)  > 0) {
+			/* lost race, packet arrived */
+			disable_rx_intr(c);
+			return;
+		}
+	}
+
+	n = rte_epoll_wait(RTE_EPOLL_PER_THREAD, events,
+			   MAX_EVENTS, TIMEOUT_MS);
+	if (n < 0)
+		rte_exit(EXIT_FAILURE, "rte_epoll_wait: failed\n");
+
+	for (i = 0; i < n; i++) {
+		unsigned long data = (unsigned long) events[i].epdata.data;
+		uint16_t port_id = data >> CHAR_BIT;
+		uint8_t queue_id = data & RTE_LEN2MASK(CHAR_BIT, uint8_t);
+
+		printf("Lcore %u awoke from rx on port %d queue %d\n",
+		       rte_lcore_id(), port_id, queue_id);
+
+	}
+	disable_rx_intr(c);
+}
+
+static void
+event_register(const struct lcore_conf *c)
+{
+	int i, ret;
+
+	for (i = 0; i < c->n_rx; i++) {
+		const struct rx_queue *rxq = &c->rx_queue_list[i];
+		unsigned long data = rxq->port_id << CHAR_BIT | rxq->queue_id;
+
+		ret = rte_eth_dev_rx_intr_ctl_q(rxq->port_id, rxq->queue_id,
+						RTE_EPOLL_PER_THREAD,
+						RTE_INTR_EVENT_ADD,
+						(void *)data);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE,
+				 "rte_eth_dev_rx_intr_ctl_q(%u, %u) failed: %d\n",
+				 rxq->port_id, rxq->queue_id, ret);
 	}
 }
 
@@ -321,37 +432,42 @@ static int
 rx_thread(void *arg __rte_unused)
 {
 	unsigned int core_id = rte_lcore_id();
-	const struct lcore_queue_conf *c = &lcore_queue_conf[core_id];
-	uint16_t i, n;
+	struct lcore_conf *c = &lcore_conf[core_id];
+	uint64_t idle_start = 0;
 
 	if (c->n_rx == 0) {
 		printf("Lcore %u has nothing to do\n", rte_lcore_id());
 		return 0;
 	}
 
-	for (i = 0; i < c->n_rx; i++) {
-		printf("Lcore %u is polling on queue %u\n",
-			core_id, c->rx_queues[i]);
-	}
-	fflush(stdout);
+	if (irq_mode)
+		event_register(c);
 
-	while (!force_quit) {
-		uint16_t t = 0;
+	while (running) {
+		unsigned int i, total = 0;
+		uint64_t cur_tsc;
 
 		for (i = 0; i < c->n_rx; i++) {
-			struct rte_mbuf *pkts[MAX_PKT_BURST];
-			uint16_t q = c->rx_queues[i];
+			const struct rx_queue *rxq = &c->rx_queue_list[i];
 
-			n = rte_eth_rx_burst(0, q, pkts, MAX_PKT_BURST);
-			t += n;
-			dump_rx_pkt(q, pkts, n);
+			total += rx_poll(rxq->port_id, rxq->queue_id);
 		}
-		fflush(stdout);
 
-		if (t == 0)
-			sleep(1);
+		if (!irq_mode)
+			continue;
+		
+		if (total > 0) {
+			idle_start = 0;
+			continue;
+		}
 
+		cur_tsc = rte_rdtsc();
+		if (idle_start == 0) {
+			idle_start = cur_tsc;
+		} else if (cur_tsc - idle_start > poll_interval)
+			sleep_until_interrupt(c);
 	}
+
 	return 0;
 }
 
@@ -369,9 +485,11 @@ static void print_mac(uint16_t portid)
 static void usage(const char *argv0)
 {
 	printf("Usage: %s [EAL options] -- -d -s -q NQ MAC1 MAC2 ...\n"
+	       "  -i      IRQ mode\n"
 	       "  -d      destination mac only match\n"
 	       "  -s      source mac only match\n"
-	       "  -q  NQ  number of queues per Vnic\n",
+	       "  -q  NQ  number of queues per Vnic\n"
+	       "  -v      verbose flow dump\n",
 	       argv0);
 	exit(1);
 }
@@ -381,8 +499,11 @@ static void parse_args(int argc, char **argv)
 	int opt;
 	unsigned int i;
 
-	while ((opt = getopt(argc, argv, "sdq:")) != EOF) {
+	while ((opt = getopt(argc, argv, "ivsdq:")) != EOF) {
 		switch (opt) {
+		case 'i':
+			irq_mode = true;
+			break;
 		case 's':
 			flow_mode = FLOW_SRC_MODE;
 			break;
@@ -391,6 +512,9 @@ static void parse_args(int argc, char **argv)
 			break;
 		case 'q':
 			num_queue = atoi(optarg);
+			break;
+		case 'v':
+			verbose = true;
 			break;
 		default:
 			usage(argv[0]);
@@ -412,13 +536,33 @@ static void parse_args(int argc, char **argv)
 
 static void signal_handler(int signum)
 {
-	if (signum == SIGINT || signum == SIGTERM) {
-		printf("\n\nSignal %d received, preparing to exit...\n",
-				signum);
-		force_quit = true;
-	}
+	printf("\n\nSignal %d received, preparing to exit...\n",
+		signum);
+
+	running = false;
 }
 
+static void
+assign_queues(uint16_t portid, uint16_t nrxq)
+{
+	uint16_t q;
+
+	for (q = 0; q < nrxq; q++) {
+		unsigned int lcore = q % rte_lcore_count();
+		struct lcore_conf *c = &lcore_conf[lcore];
+		struct rx_queue *rxq;
+
+		if (c->n_rx >= MAX_RX_QUEUE)
+			rte_exit(EXIT_FAILURE,
+				"Too many rx queue already on core %u\n",
+				lcore);
+
+		rxq = c->rx_queue_list + c->n_rx++;
+		rxq->port_id = portid;
+		rxq->queue_id = q;
+		printf("Lcore %u polling %u:%u\n", lcore, portid, q);
+	}
+}
 
 int main(int argc, char **argv)
 {
@@ -435,13 +579,15 @@ int main(int argc, char **argv)
 	ntxq = rte_lcore_count();
 	nrxq = num_vnic * num_queue + 1;
 
-	force_quit = false;
+	poll_interval = IDLE_POLL_US * (rte_get_tsc_hz() / US_PER_SEC);
+
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
 
 	n = rte_eth_dev_count_avail();
 	if (n != 1)
-		rte_exit(EXIT_FAILURE, "Expect one external port (got %u)\n", n);
+		rte_exit(EXIT_FAILURE,
+			 "Expect one external port (got %u)\n", n);
 
 	mb_pool = rte_pktmbuf_pool_create("mb_pool", NUM_MBUFS,
 					  MEMPOOL_CACHE, 0,
@@ -456,17 +602,7 @@ int main(int argc, char **argv)
 	for (v = 0, q = 1; v < num_vnic; v++, q += num_queue)
 		flow_configure(0, v, q);
 
-	for (q = 0; q < nrxq; q++) {
-		unsigned int lcore = q % rte_lcore_count();
-		struct lcore_queue_conf *c = &lcore_queue_conf[lcore];
-
-		if (c->n_rx >= MAX_RX_QUEUE)
-			rte_exit(EXIT_FAILURE,
-				"Too many rx queue already on core %u\n",
-				lcore);
-
-		c->rx_queues[c->n_rx++] = q;
-	}
+	assign_queues(0, nrxq);
 
 	r = rte_eal_mp_remote_launch(rx_thread, NULL, CALL_MASTER);
 	if (r < 0)
