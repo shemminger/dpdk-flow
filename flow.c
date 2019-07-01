@@ -41,14 +41,18 @@ static unsigned int num_queue = 1;
 #define IDLE_POLL_US	   10
 #define US_PER_SEC	   1000000ul
 #define MAX_EVENTS	   16
-#define TIMEOUT_MS	   10000
+#define STAT_INTERVAL	   10
+#define TIMEOUT_MS	   (STAT_INTERVAL * 1000)
 
 #define FLOW_SRC_MODE	1
 #define FLOW_DST_MODE	2
 
-static bool verbose = false;
+static bool flow_dump = false;
 static bool irq_mode = false;
+static bool details = false;
+static bool promicious = true;
 static unsigned long flow_mode = FLOW_SRC_MODE | FLOW_DST_MODE;
+static uint64_t tsc_hz;
 
 #define VNIC_RSS_HASH_TYPES \
 	(ETH_RSS_IPV4 | ETH_RSS_NONFRAG_IPV4_TCP | ETH_RSS_NONFRAG_IPV4_UDP | \
@@ -62,6 +66,7 @@ struct lcore_conf {
 	struct rx_queue {
 		uint16_t port_id;
 		uint16_t queue_id;
+		uint64_t rx_packets;
 	} rx_queue_list[MAX_RX_QUEUE];
 }  __rte_cache_aligned;
 static struct lcore_conf lcore_conf[RTE_MAX_LCORE];
@@ -199,7 +204,7 @@ flow_src_mac(uint16_t port, uint32_t id,
 		{ .type = RTE_FLOW_ITEM_TYPE_END },
 	};
 
-	if (verbose) {
+	if (flow_dump) {
 		printf("flow-demo: Creating src MAC filter!!\n");
 		rte_flow_dump(stdout, &attr, pattern, actions);
 	}
@@ -238,7 +243,7 @@ flow_dst_mac(uint16_t port, uint32_t id,
 		{ .type = RTE_FLOW_ITEM_TYPE_END },
 	};
 
-	if (verbose) {
+	if (flow_dump) {
 		printf("flow-demo: Creating dst MAC filter!!\n");
 		rte_flow_dump(stdout, &attr, pattern, actions);
 	}
@@ -332,19 +337,56 @@ dump_rx_pkt(uint16_t portid, uint16_t queueid,
 
 		rte_pktmbuf_free(m);
 	}
+	fflush(stdout);
+}
+
+static void
+show_stats(void) {
+	unsigned int i, lcore_id;
+	uint16_t portid;
+	struct rte_eth_stats stats;
+
+	RTE_ETH_FOREACH_DEV(portid) {
+		rte_eth_stats_get(portid, &stats);
+
+		printf("%u: %-16"PRIu64"/%16"PRIu64":",
+		       portid, stats.ipackets, stats.ibytes);
+
+		RTE_LCORE_FOREACH(lcore_id) {
+			struct lcore_conf *conf = &lcore_conf[lcore_id];
+
+			for (i = 0; i < conf->n_rx; i++) {
+				struct rx_queue *rxq = &conf->rx_queue_list[i];
+
+				if (rxq->port_id != portid)
+					continue;
+
+				printf(" %u:%"PRIu64,
+				       rxq->queue_id, rxq->rx_packets);
+				rxq->rx_packets = 0;
+			}
+		}
+	}
+
+	fflush(stdout);
 }
 
 static unsigned int
-rx_poll(uint16_t portid, uint16_t queueid)
+rx_poll(struct rx_queue *rxq)
 {
+	uint16_t portid = rxq->port_id;
+	uint16_t queueid = rxq->queue_id;
 	struct rte_mbuf *pkts[MAX_PKT_BURST];
 	unsigned int n;
 
 	n = rte_eth_rx_burst(portid, queueid, pkts, MAX_PKT_BURST);
-	if (n > 0) {
+	if (n == 0)
+		return 0;
+
+	rxq->rx_packets += n;
+	if (details)
 		dump_rx_pkt(portid, queueid, pkts, n);
-		fflush(stdout);
-	}
+
 	return n;
 }
 
@@ -353,7 +395,7 @@ static void
 enable_rx_intr(const struct lcore_conf *c)
 {
 	uint16_t i;
-	
+
 	for (i = 0; i < c->n_rx; i++) {
 		rte_eth_dev_rx_intr_enable(c->rx_queue_list[i].port_id,
 					   c->rx_queue_list[i].queue_id);
@@ -364,7 +406,7 @@ static void
 disable_rx_intr(const struct lcore_conf *c)
 {
 	uint16_t i;
-	
+
 	for (i = 0; i < c->n_rx; i++) {
 		rte_eth_dev_rx_intr_disable(c->rx_queue_list[i].port_id,
 					    c->rx_queue_list[i].queue_id);
@@ -372,7 +414,7 @@ disable_rx_intr(const struct lcore_conf *c)
 }
 
 static void
-sleep_until_interrupt(const struct lcore_conf *c)
+sleep_until_interrupt(struct lcore_conf *c)
 {
 	struct rte_epoll_event events[MAX_EVENTS];
 	int i, n;
@@ -380,11 +422,8 @@ sleep_until_interrupt(const struct lcore_conf *c)
 	enable_rx_intr(c);
 
 	for (i = 0; i < c->n_rx; i++) {
-		uint16_t port_id = c->rx_queue_list[i].port_id;
-		uint16_t queueid = c->rx_queue_list[i].queue_id;
-
 		/* make sure no packets still pending */
-		if (rx_poll(port_id, queueid)  > 0) {
+		if (rx_poll(&c->rx_queue_list[i]) > 0) {
 			/* lost race, packet arrived */
 			disable_rx_intr(c);
 			return;
@@ -434,6 +473,7 @@ rx_thread(void *arg __rte_unused)
 	unsigned int core_id = rte_lcore_id();
 	struct lcore_conf *c = &lcore_conf[core_id];
 	uint64_t idle_start = 0;
+	uint64_t next_stats;
 
 	if (c->n_rx == 0) {
 		printf("Lcore %u has nothing to do\n", rte_lcore_id());
@@ -443,25 +483,30 @@ rx_thread(void *arg __rte_unused)
 	if (irq_mode)
 		event_register(c);
 
+	next_stats = rte_rdtsc() + tsc_hz * STAT_INTERVAL;
+
 	while (running) {
 		unsigned int i, total = 0;
 		uint64_t cur_tsc;
 
-		for (i = 0; i < c->n_rx; i++) {
-			const struct rx_queue *rxq = &c->rx_queue_list[i];
-
-			total += rx_poll(rxq->port_id, rxq->queue_id);
-		}
+		for (i = 0; i < c->n_rx; i++)
+			total += rx_poll(&c->rx_queue_list[i]);
 
 		if (!irq_mode)
 			continue;
-		
+
 		if (total > 0) {
 			idle_start = 0;
 			continue;
 		}
 
 		cur_tsc = rte_rdtsc();
+		if (core_id == rte_get_master_lcore() &&
+		    cur_tsc >= next_stats) {
+			show_stats();
+			next_stats = cur_tsc + tsc_hz * STAT_INTERVAL;
+		}
+
 		if (idle_start == 0) {
 			idle_start = cur_tsc;
 		} else if (cur_tsc - idle_start > poll_interval)
@@ -484,12 +529,14 @@ static void print_mac(uint16_t portid)
 
 static void usage(const char *argv0)
 {
-	printf("Usage: %s [EAL options] -- -d -s -q NQ MAC1 MAC2 ...\n"
+	printf("Usage: %s [EAL options] -- -[idsfpV] -q NQ MAC1 MAC2 ...\n"
 	       "  -i      IRQ mode\n"
 	       "  -d      destination mac only match\n"
 	       "  -s      source mac only match\n"
+	       "  -f      flow dump\n"
+	       "  -p      don't put interface in promicious\n"
 	       "  -q  NQ  number of queues per Vnic\n"
-	       "  -v      verbose flow dump\n",
+	       "  -V      print packet details\n",
 	       argv0);
 	exit(1);
 }
@@ -499,7 +546,7 @@ static void parse_args(int argc, char **argv)
 	int opt;
 	unsigned int i;
 
-	while ((opt = getopt(argc, argv, "ivsdq:")) != EOF) {
+	while ((opt = getopt(argc, argv, "vidsfpVq:")) != EOF) {
 		switch (opt) {
 		case 'i':
 			irq_mode = true;
@@ -513,8 +560,14 @@ static void parse_args(int argc, char **argv)
 		case 'q':
 			num_queue = atoi(optarg);
 			break;
-		case 'v':
-			verbose = true;
+		case 'f':
+			flow_dump = true;
+			break;
+		case 'p':
+			promiscious = false;
+			break;
+		case 'V':
+			details = true;
 			break;
 		default:
 			usage(argv[0]);
@@ -579,7 +632,8 @@ int main(int argc, char **argv)
 	ntxq = rte_lcore_count();
 	nrxq = num_vnic * num_queue + 1;
 
-	poll_interval = IDLE_POLL_US * (rte_get_tsc_hz() / US_PER_SEC);
+	tsc_hz = rte_get_tsc_hz();
+	poll_interval = IDLE_POLL_US * (tsc_hz / US_PER_SEC);
 
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
@@ -597,7 +651,8 @@ int main(int argc, char **argv)
 
 	port_config(0, ntxq, nrxq);
 	print_mac(0);
-	rte_eth_promiscuous_enable(0);
+	if (promiscious)
+		rte_eth_promiscuous_enable(0);
 
 	for (v = 0, q = 1; v < num_vnic; v++, q += num_queue)
 		flow_configure(0, v, q);
