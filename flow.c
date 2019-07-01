@@ -39,10 +39,11 @@ static unsigned int num_queue = 1;
 #define MAX_PKT_BURST	   32
 #define MAX_RX_QUEUE	   64
 #define IDLE_POLL_US	   10
+#define MS_PER_SEC	   1000ul
 #define US_PER_SEC	   1000000ul
 #define MAX_EVENTS	   16
-#define STAT_INTERVAL	   10
-#define TIMEOUT_MS	   (STAT_INTERVAL * 1000)
+#define STAT_INTERVAL      10
+#define TIMEOUT_MS	   (STAT_INTERVAL * MS_PER_SEC)
 
 #define FLOW_SRC_MODE	1
 #define FLOW_DST_MODE	2
@@ -50,9 +51,9 @@ static unsigned int num_queue = 1;
 static bool flow_dump = false;
 static bool irq_mode = false;
 static bool details = false;
-static bool promicious = true;
+static bool promisc = true;
 static unsigned long flow_mode = FLOW_SRC_MODE | FLOW_DST_MODE;
-static uint64_t tsc_hz;
+static uint32_t ticks_us;
 
 #define VNIC_RSS_HASH_TYPES \
 	(ETH_RSS_IPV4 | ETH_RSS_NONFRAG_IPV4_TCP | ETH_RSS_NONFRAG_IPV4_UDP | \
@@ -73,7 +74,7 @@ static struct lcore_conf lcore_conf[RTE_MAX_LCORE];
 
 static struct rte_mempool *mb_pool;
 
-static const struct rte_eth_conf port_conf = {
+static struct rte_eth_conf port_conf = {
 	.rxmode = {
 		.mq_mode	= ETH_MQ_RX_NONE,
 		.max_rx_pkt_len = RTE_ETHER_MAX_LEN,
@@ -90,7 +91,6 @@ static const struct rte_eth_conf port_conf = {
 };
 
 static volatile bool running = true;
-static uint64_t poll_interval;	/* cycles */
 
 static void port_config(uint16_t portid, uint16_t ntxq, uint16_t nrxq)
 {
@@ -113,6 +113,9 @@ static void port_config(uint16_t portid, uint16_t ntxq, uint16_t nrxq)
 		rte_exit(EXIT_FAILURE,
 			 "Not enough receive queues %u > %u\n",
 			nrxq, dev_info.max_rx_queues);
+
+	if (irq_mode)
+		port_conf.intr_conf.rxq = 1;
 
 	printf("Configure %u Tx and %u Rx queues\n", ntxq, nrxq);
 	r = rte_eth_dev_configure(portid, nrxq, ntxq, &port_conf);
@@ -349,7 +352,7 @@ show_stats(void) {
 	RTE_ETH_FOREACH_DEV(portid) {
 		rte_eth_stats_get(portid, &stats);
 
-		printf("%u: %-16"PRIu64"/%16"PRIu64":",
+		printf("%u: %"PRIu64"/%"PRIu64" |",
 		       portid, stats.ipackets, stats.ibytes);
 
 		RTE_LCORE_FOREACH(lcore_id) {
@@ -366,6 +369,7 @@ show_stats(void) {
 				rxq->rx_packets = 0;
 			}
 		}
+		printf("\n");
 	}
 
 	fflush(stdout);
@@ -422,28 +426,21 @@ sleep_until_interrupt(struct lcore_conf *c)
 	enable_rx_intr(c);
 
 	for (i = 0; i < c->n_rx; i++) {
-		/* make sure no packets still pending */
-		if (rx_poll(&c->rx_queue_list[i]) > 0) {
+		n = rte_eth_rx_queue_count(c->rx_queue_list[i].port_id,
+					   c->rx_queue_list[i].queue_id);
+		if (n > 0) {
 			/* lost race, packet arrived */
 			disable_rx_intr(c);
 			return;
 		}
 	}
 
+	fflush(stdout);
 	n = rte_epoll_wait(RTE_EPOLL_PER_THREAD, events,
 			   MAX_EVENTS, TIMEOUT_MS);
 	if (n < 0)
 		rte_exit(EXIT_FAILURE, "rte_epoll_wait: failed\n");
 
-	for (i = 0; i < n; i++) {
-		unsigned long data = (unsigned long) events[i].epdata.data;
-		uint16_t port_id = data >> CHAR_BIT;
-		uint8_t queue_id = data & RTE_LEN2MASK(CHAR_BIT, uint8_t);
-
-		printf("Lcore %u awoke from rx on port %d queue %d\n",
-		       rte_lcore_id(), port_id, queue_id);
-
-	}
 	disable_rx_intr(c);
 }
 
@@ -467,13 +464,18 @@ event_register(const struct lcore_conf *c)
 	}
 }
 
+static int elapsed_us(uint64_t t1, uint64_t t0)
+{
+	return (int64_t)(t1 - t0) / ticks_us;
+}
+
 static int
 rx_thread(void *arg __rte_unused)
 {
 	unsigned int core_id = rte_lcore_id();
 	struct lcore_conf *c = &lcore_conf[core_id];
 	uint64_t idle_start = 0;
-	uint64_t next_stats;
+	uint64_t last_stats = rte_rdtsc();
 
 	if (c->n_rx == 0) {
 		printf("Lcore %u has nothing to do\n", rte_lcore_id());
@@ -483,14 +485,21 @@ rx_thread(void *arg __rte_unused)
 	if (irq_mode)
 		event_register(c);
 
-	next_stats = rte_rdtsc() + tsc_hz * STAT_INTERVAL;
-
 	while (running) {
 		unsigned int i, total = 0;
 		uint64_t cur_tsc;
+		int us;
 
 		for (i = 0; i < c->n_rx; i++)
 			total += rx_poll(&c->rx_queue_list[i]);
+
+		cur_tsc = rte_rdtsc();
+		us = elapsed_us(cur_tsc, last_stats);
+		if (core_id == rte_get_master_lcore() &&
+		    us >= (int)(STAT_INTERVAL * US_PER_SEC)) {
+			last_stats = cur_tsc;
+			show_stats();
+		}
 
 		if (!irq_mode)
 			continue;
@@ -500,17 +509,16 @@ rx_thread(void *arg __rte_unused)
 			continue;
 		}
 
-		cur_tsc = rte_rdtsc();
-		if (core_id == rte_get_master_lcore() &&
-		    cur_tsc >= next_stats) {
-			show_stats();
-			next_stats = cur_tsc + tsc_hz * STAT_INTERVAL;
-		}
-
 		if (idle_start == 0) {
 			idle_start = cur_tsc;
-		} else if (cur_tsc - idle_start > poll_interval)
+			continue;
+		}
+
+		us = elapsed_us(cur_tsc, idle_start);
+		if (us >= IDLE_POLL_US) {
 			sleep_until_interrupt(c);
+			idle_start = 0;
+		}
 	}
 
 	return 0;
@@ -564,7 +572,7 @@ static void parse_args(int argc, char **argv)
 			flow_dump = true;
 			break;
 		case 'p':
-			promiscious = false;
+			promisc = false;
 			break;
 		case 'V':
 			details = true;
@@ -632,8 +640,7 @@ int main(int argc, char **argv)
 	ntxq = rte_lcore_count();
 	nrxq = num_vnic * num_queue + 1;
 
-	tsc_hz = rte_get_tsc_hz();
-	poll_interval = IDLE_POLL_US * (tsc_hz / US_PER_SEC);
+	ticks_us = rte_get_tsc_hz() / US_PER_SEC;
 
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
@@ -651,7 +658,7 @@ int main(int argc, char **argv)
 
 	port_config(0, ntxq, nrxq);
 	print_mac(0);
-	if (promiscious)
+	if (promisc)
 		rte_eth_promiscuous_enable(0);
 
 	for (v = 0, q = 1; v < num_vnic; v++, q += num_queue)
