@@ -666,6 +666,7 @@ int main(int argc, char **argv)
 
 	assign_queues(0, nrxq);
 
+	printf("Portid: Packets/Bytes | queue:pkts...\n");
 	r = rte_eal_mp_remote_launch(rx_thread, NULL, CALL_MASTER);
 	if (r < 0)
 		rte_exit(EXIT_FAILURE, "cannot launch cores");
