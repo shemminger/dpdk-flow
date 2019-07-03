@@ -21,6 +21,8 @@
 #include <rte_mbuf.h>
 #include <rte_flow.h>
 #include <rte_lcore.h>
+#include <rte_timer.h>
+#include <rte_cycles.h>
 
 #include "eth_compat.h"
 #include "rte_flow_dump.h"
@@ -39,11 +41,8 @@ static unsigned int num_queue = 1;
 #define MAX_PKT_BURST	   32
 #define MAX_RX_QUEUE	   64
 #define IDLE_POLL_US	   10
-#define MS_PER_SEC	   1000ul
-#define US_PER_SEC	   1000000ul
 #define MAX_EVENTS	   16
 #define STAT_INTERVAL      10
-#define TIMEOUT_MS	   (STAT_INTERVAL * MS_PER_SEC)
 
 #define FLOW_SRC_MODE	1
 #define FLOW_DST_MODE	2
@@ -54,6 +53,7 @@ static bool details = false;
 static bool promisc = true;
 static unsigned long flow_mode = FLOW_SRC_MODE | FLOW_DST_MODE;
 static uint32_t ticks_us;
+static struct rte_timer stat_timer;
 
 #define VNIC_RSS_HASH_TYPES \
 	(ETH_RSS_IPV4 | ETH_RSS_NONFRAG_IPV4_TCP | ETH_RSS_NONFRAG_IPV4_UDP | \
@@ -344,7 +344,8 @@ dump_rx_pkt(uint16_t portid, uint16_t queueid,
 }
 
 static void
-show_stats(void) {
+show_stats(struct rte_timer *tm __rte_unused, void *arg __rte_unused)
+{
 	unsigned int i, lcore_id;
 	uint16_t portid;
 	struct rte_eth_stats stats;
@@ -435,17 +436,17 @@ sleep_until_interrupt(struct lcore_conf *c)
 		}
 	}
 
-	fflush(stdout);
 	n = rte_epoll_wait(RTE_EPOLL_PER_THREAD, events,
-			   MAX_EVENTS, TIMEOUT_MS);
-	if (n < 0)
-		rte_exit(EXIT_FAILURE, "rte_epoll_wait: failed\n");
+			   MAX_EVENTS, STAT_INTERVAL * MS_PER_S);
+	if (n < 0 && errno == EINTR)
+		rte_exit(EXIT_FAILURE, "rte_epoll_wait_interruptible: failed: %s\n",
+			 strerror(errno));
 
 	disable_rx_intr(c);
 }
 
 static void
-event_register(const struct lcore_conf *c)
+event_register(struct lcore_conf *c)
 {
 	int i, ret;
 
@@ -475,12 +476,9 @@ rx_thread(void *arg __rte_unused)
 	unsigned int core_id = rte_lcore_id();
 	struct lcore_conf *c = &lcore_conf[core_id];
 	uint64_t idle_start = 0;
-	uint64_t last_stats = rte_rdtsc();
 
-	if (c->n_rx == 0) {
-		printf("Lcore %u has nothing to do\n", rte_lcore_id());
+	if (c->n_rx == 0)
 		return 0;
-	}
 
 	if (irq_mode)
 		event_register(c);
@@ -490,16 +488,10 @@ rx_thread(void *arg __rte_unused)
 		uint64_t cur_tsc;
 		int us;
 
+		rte_timer_manage();
+
 		for (i = 0; i < c->n_rx; i++)
 			total += rx_poll(&c->rx_queue_list[i]);
-
-		cur_tsc = rte_rdtsc();
-		us = elapsed_us(cur_tsc, last_stats);
-		if (core_id == rte_get_master_lcore() &&
-		    us >= (int)(STAT_INTERVAL * US_PER_SEC)) {
-			last_stats = cur_tsc;
-			show_stats();
-		}
 
 		if (!irq_mode)
 			continue;
@@ -509,6 +501,7 @@ rx_thread(void *arg __rte_unused)
 			continue;
 		}
 
+		cur_tsc = rte_rdtsc();
 		if (idle_start == 0) {
 			idle_start = cur_tsc;
 			continue;
@@ -621,7 +614,6 @@ assign_queues(uint16_t portid, uint16_t nrxq)
 		rxq = c->rx_queue_list + c->n_rx++;
 		rxq->port_id = portid;
 		rxq->queue_id = q;
-		printf("Lcore %u polling %u:%u\n", lcore, portid, q);
 	}
 }
 
@@ -640,7 +632,7 @@ int main(int argc, char **argv)
 	ntxq = rte_lcore_count();
 	nrxq = num_vnic * num_queue + 1;
 
-	ticks_us = rte_get_tsc_hz() / US_PER_SEC;
+	ticks_us = rte_get_tsc_hz() / US_PER_S;
 
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
@@ -656,6 +648,8 @@ int main(int argc, char **argv)
 	if (!mb_pool)
 		rte_exit(EXIT_FAILURE, "Cannot init mbuf pool\n");
 
+	rte_timer_subsystem_init();
+
 	port_config(0, ntxq, nrxq);
 	print_mac(0);
 	if (promisc)
@@ -666,7 +660,13 @@ int main(int argc, char **argv)
 
 	assign_queues(0, nrxq);
 
-	printf("Portid: Packets/Bytes | queue:pkts...\n");
+	rte_timer_init(&stat_timer);
+	rte_timer_reset(&stat_timer,
+			STAT_INTERVAL * rte_get_timer_hz(),
+			PERIODICAL, rte_get_master_lcore(),
+			show_stats, NULL);
+
+	printf("\nPortid: Packets/Bytes | queue:pkts...\n");
 	r = rte_eal_mp_remote_launch(rx_thread, NULL, CALL_MASTER);
 	if (r < 0)
 		rte_exit(EXIT_FAILURE, "cannot launch cores");
