@@ -54,6 +54,7 @@ static bool promisc = true;
 static unsigned long flow_mode = FLOW_SRC_MODE | FLOW_DST_MODE;
 static uint32_t ticks_us;
 static struct rte_timer stat_timer;
+static struct timespec start_time;
 
 #define VNIC_RSS_HASH_TYPES \
 	(ETH_RSS_IPV4 | ETH_RSS_NONFRAG_IPV4_TCP | ETH_RSS_NONFRAG_IPV4_UDP | \
@@ -316,6 +317,24 @@ static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
 	}
 }
 
+static const char *timestamp(void)
+{
+	struct timespec ts;
+	static char buf[128];
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+
+	if (ts.tv_nsec < start_time.tv_nsec) {
+		ts.tv_nsec += NS_PER_S;
+		ts.tv_sec -= 1;
+	}
+
+	snprintf(buf, sizeof(buf), "%ld.%03ld",
+		 ts.tv_sec - start_time.tv_sec,
+		 (ts.tv_nsec - start_time.tv_nsec) / (NS_PER_S / MS_PER_S));
+	return buf;
+}
+
 static void
 dump_rx_pkt(uint16_t portid, uint16_t queueid,
 	    struct rte_mbuf *pkts[], uint16_t n)
@@ -334,8 +353,13 @@ dump_rx_pkt(uint16_t portid, uint16_t queueid,
 		rte_ether_format_addr(sbuf, RTE_ETHER_ADDR_FMT_SIZE,
 				      &eh->s_addr);
 
-		printf("[%u:%u] %s %s %x ..%u\n", portid, queueid,
-		       dbuf, sbuf,
+		printf("%-14s:     [%u:%u] %s %s",
+		       timestamp(), portid, queueid, dbuf, sbuf);
+
+		if (m->ol_flags & PKT_RX_VLAN_STRIPPED)
+			printf(" tci %u", m->vlan_tci);
+
+		printf(" %x ..%u\n",
 		       ntohs(eh->ether_type), rte_pktmbuf_pkt_len(m));
 
 		rte_pktmbuf_free(m);
@@ -347,31 +371,27 @@ static void
 show_stats(struct rte_timer *tm __rte_unused, void *arg __rte_unused)
 {
 	unsigned int i, lcore_id;
-	uint16_t portid;
 	struct rte_eth_stats stats;
+	char buf[128];
 
-	RTE_ETH_FOREACH_DEV(portid) {
-		rte_eth_stats_get(portid, &stats);
+	rte_eth_stats_get(0, &stats);
 
-		printf("%u: %"PRIu64"/%"PRIu64" |",
-		       portid, stats.ipackets, stats.ibytes);
+	snprintf(buf, sizeof(buf), "%"PRIu64"/%"PRIu64,
+	       stats.ipackets, stats.ibytes);
 
-		RTE_LCORE_FOREACH(lcore_id) {
-			struct lcore_conf *conf = &lcore_conf[lcore_id];
+	printf("%-14s: %-12s | ", timestamp(), buf);
 
-			for (i = 0; i < conf->n_rx; i++) {
-				struct rx_queue *rxq = &conf->rx_queue_list[i];
+	RTE_LCORE_FOREACH(lcore_id) {
+		struct lcore_conf *conf = &lcore_conf[lcore_id];
 
-				if (rxq->port_id != portid)
-					continue;
+		for (i = 0; i < conf->n_rx; i++) {
+			struct rx_queue *rxq = &conf->rx_queue_list[i];
 
-				printf(" %u:%"PRIu64,
-				       rxq->queue_id, rxq->rx_packets);
-				rxq->rx_packets = 0;
-			}
+			printf(" %u:%"PRIu64,
+			       rxq->queue_id, rxq->rx_packets);
 		}
-		printf("\n");
 	}
+	printf("\n");
 
 	fflush(stdout);
 }
@@ -666,7 +686,10 @@ int main(int argc, char **argv)
 			PERIODICAL, rte_get_master_lcore(),
 			show_stats, NULL);
 
-	printf("\nPortid: Packets/Bytes | queue:pkts...\n");
+	printf("\n%-14s: %8s/%-10s | per-queue\n",
+	       "Time", "Packets", "Bytes");
+	clock_gettime(CLOCK_MONOTONIC, &start_time);
+
 	r = rte_eal_mp_remote_launch(rx_thread, NULL, CALL_MASTER);
 	if (r < 0)
 		rte_exit(EXIT_FAILURE, "cannot launch cores");
