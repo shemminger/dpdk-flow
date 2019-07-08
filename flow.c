@@ -1,5 +1,5 @@
 /*
- * Demo rte_flow default rule
+ * demo rte_flow default rule
  * Copyright(c) 2019 Microsoft Corporation
  * All rights reserved.
  *
@@ -26,6 +26,7 @@
 
 #include "eth_compat.h"
 #include "rte_flow_dump.h"
+#include "pkt_dump.h"
 
 /* steal ether_aton fron netinet/ether.h */
 struct ether_addr *ether_aton_r(const char *asc, struct ether_addr *addr);
@@ -54,7 +55,6 @@ static bool promisc = true;
 static unsigned long flow_mode = FLOW_SRC_MODE | FLOW_DST_MODE;
 static uint32_t ticks_us;
 static struct rte_timer stat_timer;
-static struct timespec start_time;
 
 #define VNIC_RSS_HASH_TYPES \
 	(ETH_RSS_IPV4 | ETH_RSS_NONFRAG_IPV4_TCP | ETH_RSS_NONFRAG_IPV4_UDP | \
@@ -317,24 +317,6 @@ static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
 	}
 }
 
-static const char *timestamp(void)
-{
-	struct timespec ts;
-	static char buf[128];
-
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-
-	if (ts.tv_nsec < start_time.tv_nsec) {
-		ts.tv_nsec += NS_PER_S;
-		ts.tv_sec -= 1;
-	}
-
-	snprintf(buf, sizeof(buf), "%ld.%03ld",
-		 ts.tv_sec - start_time.tv_sec,
-		 (ts.tv_nsec - start_time.tv_nsec) / (NS_PER_S / MS_PER_S));
-	return buf;
-}
-
 static void
 dump_rx_pkt(uint16_t portid, uint16_t queueid,
 	    struct rte_mbuf *pkts[], uint16_t n)
@@ -342,27 +324,10 @@ dump_rx_pkt(uint16_t portid, uint16_t queueid,
 	uint16_t i;
 
 	for (i = 0; i < n; i++) {
-		struct rte_mbuf *m = pkts[i];
-		const struct rte_ether_hdr *eh
-			= rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
-		char dbuf[RTE_ETHER_ADDR_FMT_SIZE];
-		char sbuf[RTE_ETHER_ADDR_FMT_SIZE];
+		printf("[%u:%u] ",
+		       portid, queueid);
 
-		rte_ether_format_addr(dbuf, RTE_ETHER_ADDR_FMT_SIZE,
-				      &eh->d_addr);
-		rte_ether_format_addr(sbuf, RTE_ETHER_ADDR_FMT_SIZE,
-				      &eh->s_addr);
-
-		printf("%-14s:     [%u:%u] %s %s",
-		       timestamp(), portid, queueid, dbuf, sbuf);
-
-		if (m->ol_flags & PKT_RX_VLAN_STRIPPED)
-			printf(" tci %u", m->vlan_tci);
-
-		printf(" %x ..%u\n",
-		       ntohs(eh->ether_type), rte_pktmbuf_pkt_len(m));
-
-		rte_pktmbuf_free(m);
+		pkt_print(pkts[i]);
 	}
 	fflush(stdout);
 }
@@ -372,14 +337,10 @@ show_stats(struct rte_timer *tm __rte_unused, void *arg __rte_unused)
 {
 	unsigned int i, lcore_id;
 	struct rte_eth_stats stats;
-	char buf[128];
 
 	rte_eth_stats_get(0, &stats);
 
-	snprintf(buf, sizeof(buf), "%"PRIu64"/%"PRIu64,
-	       stats.ipackets, stats.ibytes);
-
-	printf("%-14s: %-12s | ", timestamp(), buf);
+	printf("%"PRIu64"/%"PRIu64, stats.ipackets, stats.ibytes);
 
 	RTE_LCORE_FOREACH(lcore_id) {
 		struct lcore_conf *conf = &lcore_conf[lcore_id];
@@ -402,7 +363,7 @@ rx_poll(struct rx_queue *rxq)
 	uint16_t portid = rxq->port_id;
 	uint16_t queueid = rxq->queue_id;
 	struct rte_mbuf *pkts[MAX_PKT_BURST];
-	unsigned int n;
+	unsigned int i, n;
 
 	n = rte_eth_rx_burst(portid, queueid, pkts, MAX_PKT_BURST);
 	if (n == 0)
@@ -411,6 +372,9 @@ rx_poll(struct rx_queue *rxq)
 	rxq->rx_packets += n;
 	if (details)
 		dump_rx_pkt(portid, queueid, pkts, n);
+
+	for (i = 0; i < n; i++)
+		rte_pktmbuf_free(pkts[i]);
 
 	return n;
 }
@@ -567,7 +531,7 @@ static void parse_args(int argc, char **argv)
 	int opt;
 	unsigned int i;
 
-	while ((opt = getopt(argc, argv, "vidsfpVq:")) != EOF) {
+	while ((opt = getopt(argc, argv, "vidsfpq:")) != EOF) {
 		switch (opt) {
 		case 'i':
 			irq_mode = true;
@@ -587,7 +551,7 @@ static void parse_args(int argc, char **argv)
 		case 'p':
 			promisc = false;
 			break;
-		case 'V':
+		case 'v':
 			details = true;
 			break;
 		default:
@@ -688,7 +652,6 @@ int main(int argc, char **argv)
 
 	printf("\n%-14s: %8s/%-10s | per-queue\n",
 	       "Time", "Packets", "Bytes");
-	clock_gettime(CLOCK_MONOTONIC, &start_time);
 
 	r = rte_eal_mp_remote_launch(rx_thread, NULL, CALL_MASTER);
 	if (r < 0)

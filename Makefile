@@ -5,7 +5,7 @@
 APP = flow-demo
 
 # all source are stored in SRCS-y
-SRCS-y := flow.c rte_flow_dump.c
+SRCS-y := flow.c rte_flow_dump.c pkt_dump.c
 
 
 ifeq ($(RTE_SDK),)
