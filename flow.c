@@ -146,6 +146,9 @@ static void port_config(uint16_t portid, uint16_t ntxq, uint16_t nrxq)
 	}
 
 	for (q = 0; q < nrxq; q++) {
+		if (q > 0)
+			rxq_conf.rx_deferred_start = 1;
+
 		r = rte_eth_rx_queue_setup(portid, q, nb_rxd, 0, &rxq_conf,
 					   mb_pool);
 		if (r < 0)
@@ -158,15 +161,8 @@ static void port_config(uint16_t portid, uint16_t ntxq, uint16_t nrxq)
 	if (r < 0)
 		rte_exit(EXIT_FAILURE,
 			 "Start failed: err=%d\n", r);
-
-	/* Stop all VNIC queues */
-	for (q = 1; q < nrxq; q++) {
-		r = rte_eth_dev_rx_queue_stop(portid, q);
-		if (r < 0)
-			rte_exit(EXIT_FAILURE, "queue %u stop failed\n",
-				q);
-	}
 }
+
 /* Match any level mask */
 static const struct rte_flow_item_any any_mask = {
 	.num = UINT32_MAX,
