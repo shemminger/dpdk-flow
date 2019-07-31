@@ -560,11 +560,11 @@ static void parse_args(int argc, char **argv)
 	}
 
 	/* Additional arguments are MAC address of VNICs */
-	num_vnic = argc - optind;
+	num_vnic = argc - optind + 1;
 	vnic_mac = calloc(sizeof(struct rte_ether_addr), num_vnic);
 
-	for (i = 0; i < num_vnic; i++) {
-		const char *asc = argv[optind + i];
+	for (i = 1; i < num_vnic; i++) {
+		const char *asc = argv[optind + i - 1];
 
 		if (ether_aton_r(asc, (struct ether_addr *)(vnic_mac + i)) == NULL)
 			rte_exit(EXIT_FAILURE,
@@ -614,7 +614,7 @@ int main(int argc, char **argv)
 	parse_args(argc - r, argv + r);
 
 	ntxq = rte_lcore_count();
-	nrxq = num_vnic * num_queue + 1;
+	nrxq = num_vnic * num_queue;
 
 	ticks_us = rte_get_tsc_hz() / US_PER_S;
 
@@ -639,7 +639,7 @@ int main(int argc, char **argv)
 	if (promisc)
 		rte_eth_promiscuous_enable(0);
 
-	for (v = 0, q = 1; v < num_vnic; v++, q += num_queue)
+	for (v = 1, q = 1; v < num_vnic; v++, q += num_queue)
 		flow_configure(0, v, q);
 
 	assign_queues(0, nrxq);
