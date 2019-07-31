@@ -11,6 +11,7 @@
 #include <rte_ip.h>
 #include <rte_udp.h>
 #include <rte_ether.h>
+#include <rte_cycles.h>
 
 #include "pkt_dump.h"
 
