@@ -8,7 +8,6 @@
  *
  * Usage:
  *    flow-demo EAL_args -- [--queues Q]  MAC...
- *
  */
 
 #include <stdio.h>
@@ -30,6 +29,7 @@
 
 /* steal ether_aton fron netinet/ether.h */
 struct ether_addr *ether_aton_r(const char *asc, struct ether_addr *addr);
+char *ether_ntoa_r(const struct ether_addr *addr, char *buf);
 
 static unsigned int num_vnic;
 static struct rte_ether_addr *vnic_mac;
@@ -268,11 +268,12 @@ static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
 		{ .type = RTE_FLOW_ACTION_TYPE_END  },
 	};
 	struct rte_flow_error err;
+	char buf[64];
 	uint16_t q;
 	int r;
 
-	printf("Creating VNIC %u with queue %u..%u\n",
-	       id, firstq, lastq);
+	printf("Creating VNIC %u [%s] with queue %u..%u\n",
+	       id, ether_ntoa_r(mac, buf), firstq, lastq);
 
 	if (num_queue > 1) {
 		uint16_t i;
@@ -461,8 +462,10 @@ rx_thread(void *arg __rte_unused)
 	struct lcore_conf *c = &lcore_conf[core_id];
 	uint64_t idle_start = 0;
 
-	if (c->n_rx == 0)
+	if (c->n_rx == 0) {
+		fprintf(stderr, "core %u: no rx assigned\n", core_id);
 		return 0;
+	}
 
 	if (irq_mode)
 		event_register(c);
@@ -514,14 +517,14 @@ static void print_mac(uint16_t portid)
 
 static void usage(const char *argv0)
 {
-	printf("Usage: %s [EAL options] -- -[idsfpV] -q NQ MAC1 MAC2 ...\n"
+	printf("Usage: %s [EAL options] -- -[idsfpv] -q NQ MAC1 MAC2 ...\n"
 	       "  -i      IRQ mode\n"
 	       "  -d      destination mac only match\n"
 	       "  -s      source mac only match\n"
 	       "  -f      flow dump\n"
 	       "  -p      don't put interface in promicious\n"
 	       "  -q  NQ  number of queues per Vnic\n"
-	       "  -V      print packet details\n",
+	       "  -v      print packet details\n",
 	       argv0);
 	exit(1);
 }
@@ -555,18 +558,18 @@ static void parse_args(int argc, char **argv)
 			details = true;
 			break;
 		default:
+			fprintf(stderr, "Unknown option\n");
 			usage(argv[0]);
 		}
 	}
 
 	/* Additional arguments are MAC address of VNICs */
-	num_vnic = argc - optind + 1;
+	num_vnic = argc - optind;
 	vnic_mac = calloc(sizeof(struct rte_ether_addr), num_vnic);
+	for (i = 0; i < num_vnic; i++) {
+		const char *asc = argv[optind + i];
 
-	for (i = 1; i < num_vnic; i++) {
-		const char *asc = argv[optind + i - 1];
-
-		if (ether_aton_r(asc, (struct ether_addr *)(vnic_mac + i)) == NULL)
+		if (ether_aton_r(asc, &vnic_mac[i]) == NULL)
 			rte_exit(EXIT_FAILURE,
 				"Invalid mac address: %s\n", asc);
 	}
@@ -583,13 +586,15 @@ static void signal_handler(int signum)
 static void
 assign_queues(uint16_t portid, uint16_t nrxq)
 {
+	static int lcore = -1;
 	uint16_t q;
 
 	for (q = 0; q < nrxq; q++) {
-		unsigned int lcore = q % rte_lcore_count();
-		struct lcore_conf *c = &lcore_conf[lcore];
+		struct lcore_conf *c;
 		struct rx_queue *rxq;
 
+		lcore = rte_get_next_lcore(lcore, 0, 1);
+		c = &lcore_conf[lcore];
 		if (c->n_rx >= MAX_RX_QUEUE)
 			rte_exit(EXIT_FAILURE,
 				"Too many rx queue already on core %u\n",
@@ -614,7 +619,7 @@ int main(int argc, char **argv)
 	parse_args(argc - r, argv + r);
 
 	ntxq = rte_lcore_count();
-	nrxq = num_vnic * num_queue;
+	nrxq = num_vnic * num_queue + 1;
 
 	ticks_us = rte_get_tsc_hz() / US_PER_S;
 
@@ -639,7 +644,7 @@ int main(int argc, char **argv)
 	if (promisc)
 		rte_eth_promiscuous_enable(0);
 
-	for (v = 1, q = 1; v < num_vnic; v++, q += num_queue)
+	for (v = 0, q = 1; v < num_vnic; v++, q += num_queue)
 		flow_configure(0, v, q);
 
 	assign_queues(0, nrxq);
@@ -657,6 +662,8 @@ int main(int argc, char **argv)
 	if (r < 0)
 		rte_exit(EXIT_FAILURE, "cannot launch cores");
 
+	if (promisc)
+		rte_eth_promiscuous_disable(0);
 	rte_eth_dev_stop(0);
 	rte_eth_dev_close(0);
 
