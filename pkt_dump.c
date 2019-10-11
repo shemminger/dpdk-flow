@@ -47,19 +47,18 @@ static const char *ip_proto(uint16_t proto)
 	}
 }
 
-
 static void pkt_decode(char *str, size_t len,
-		       const struct ether_hdr *eh)
+		       const struct rte_ether_hdr *eh)
 {
 	char src_str[INET6_ADDRSTRLEN], dst_str[INET6_ADDRSTRLEN];
 	char proto[128];
 
-	switch (ntohs(eh->ether_type)) {
-	case ETHER_TYPE_IPv4: {
-		const struct ipv4_hdr *ip
-			= (const struct ipv4_hdr *)(eh + 1);
-		const struct udp_hdr *udp
-			= (const struct udp_hdr *)(ip + 1);
+	switch (rte_be_to_cpu_16(eh->ether_type)) {
+	case RTE_ETHER_TYPE_IPV4: {
+		const struct rte_ipv4_hdr *ip
+			= (const struct rte_ipv4_hdr *)(eh + 1);
+		const struct rte_udp_hdr *udp
+			= (const struct rte_udp_hdr *)(ip + 1);
 		uint16_t l4_proto = ip->next_proto_id;
 
 		inet_ntop(AF_INET, &ip->src_addr,
@@ -69,19 +68,22 @@ static void pkt_decode(char *str, size_t len,
 
 		if (l4_proto == IPPROTO_UDP &&
 		    ntohs(udp->dst_port) == 4789) {
-			const struct vxlan_hdr *vxlan;
+			const struct rte_vxlan_hdr *vxlan;
 			uint32_t vni;
 			int cc;
 
-			vxlan = (const struct vxlan_hdr *)(udp +1);
-			vni = ntohl(vxlan->vx_vni) >> 8;
+			vxlan = (const struct rte_vxlan_hdr *)(udp +1);
+			vni = rte_be_to_cpu_32(vxlan->vx_vni) >> 8;
 
 			cc = snprintf(str, len, "%s → %s VXLAN %u ",
 				      src_str, dst_str, vni);
 
-			eh = (const struct ether_hdr *)(vxlan + 1);
-			ether_format_addr(src_str, ETHER_ADDR_FMT_SIZE, &eh->s_addr);
-			ether_format_addr(dst_str, ETHER_ADDR_FMT_SIZE, &eh->d_addr);
+			eh = (const struct rte_ether_hdr *)(vxlan + 1);
+
+			rte_ether_format_addr(src_str, sizeof(src_str),
+					      &eh->s_addr);
+			rte_ether_format_addr(dst_str, sizeof(dst_str),
+					      &eh->d_addr);
 			cc += snprintf(str + cc, len - cc,
 				       "%s → %s ", src_str, dst_str);
 
@@ -93,9 +95,9 @@ static void pkt_decode(char *str, size_t len,
 		break;
 	}
 
-	case ETHER_TYPE_IPv6: {
-		const struct ipv6_hdr *ip6
-			= (const struct ipv6_hdr *)(eh + 1);
+	case RTE_ETHER_TYPE_IPV6: {
+		const struct rte_ipv6_hdr *ip6
+			= (const struct rte_ipv6_hdr *)(eh + 1);
 
 		inet_ntop(AF_INET6, &ip6->src_addr,
 			  src_str, INET6_ADDRSTRLEN);
@@ -105,12 +107,12 @@ static void pkt_decode(char *str, size_t len,
 		break;
 	}
 
-	case ETHER_TYPE_ARP:
+	case RTE_ETHER_TYPE_ARP:
 		strcpy(proto, "ARP");
 		/* fallthrough */
 	default:
-		ether_format_addr(src_str, ETHER_ADDR_FMT_SIZE, &eh->s_addr);
-		ether_format_addr(dst_str, ETHER_ADDR_FMT_SIZE, &eh->d_addr);
+		rte_ether_format_addr(src_str, sizeof(src_str), &eh->s_addr);
+		rte_ether_format_addr(dst_str, sizeof(dst_str), &eh->d_addr);
 		snprintf(proto, sizeof(proto), "%#x", ntohs(eh->ether_type));
 	}
 
@@ -120,11 +122,12 @@ static void pkt_decode(char *str, size_t len,
 
 void pkt_print(const struct rte_mbuf *m)
 {
+	const struct rte_ether_hdr *eh;
 	uint64_t us = time_monotonic() / 1000;
 	char decode_buf[1024];
 
-	pkt_decode(decode_buf, sizeof(decode_buf),
-		   rte_pktmbuf_mtod(m, const struct ether_hdr *));
+	eh = rte_pktmbuf_mtod(m, const struct rte_ether_hdr *);
+	pkt_decode(decode_buf, sizeof(decode_buf), eh);
 
 	printf("%-6u %"PRId64".%06"PRId64,
 	       ++pktno, us / US_PER_S, us % US_PER_S);
