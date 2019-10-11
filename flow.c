@@ -27,10 +27,6 @@
 #include "rte_flow_dump.h"
 #include "pkt_dump.h"
 
-/* steal ether_aton fron netinet/ether.h */
-struct ether_addr *ether_aton_r(const char *asc, struct ether_addr *addr);
-char *ether_ntoa_r(const struct ether_addr *addr, char *buf);
-
 static unsigned int num_vnic;
 static struct rte_ether_addr *vnic_mac;
 static unsigned int num_queue = 1;
@@ -268,8 +264,9 @@ static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
 	uint16_t q;
 	int r;
 
+	rte_ether_format_addr(buf, sizeof(buf), mac);
 	printf("Creating VNIC %u [%s] with queue %u..%u\n",
-	       id, ether_ntoa_r(mac, buf), firstq, lastq);
+	       id, buf, firstq, lastq);
 
 	if (num_queue > 1) {
 		uint16_t i;
@@ -565,7 +562,7 @@ static void parse_args(int argc, char **argv)
 	for (i = 0; i < num_vnic; i++) {
 		const char *asc = argv[optind + i];
 
-		if (ether_aton_r(asc, &vnic_mac[i]) == NULL)
+		if (rte_ether_unformat_addr(asc, &vnic_mac[i]) != 0)
 			rte_exit(EXIT_FAILURE,
 				"Invalid mac address: %s\n", asc);
 	}

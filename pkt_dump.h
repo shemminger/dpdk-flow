@@ -4,4 +4,3 @@
  */
 
 void pkt_print(const struct rte_mbuf *m);
-
