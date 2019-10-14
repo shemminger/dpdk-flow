@@ -52,6 +52,8 @@ static bool flow_dump = false;
 static bool irq_mode = false;
 static bool details = false;
 static bool promisc = true;
+static bool broadcast_only = false;
+static bool multicast_only = false;
 static unsigned long flow_mode = FLOW_SRC_MODE | FLOW_DST_MODE;
 static uint32_t ticks_us;
 static struct rte_timer stat_timer;
@@ -321,10 +323,21 @@ dump_rx_pkt(uint16_t portid, uint16_t queueid,
 	uint16_t i;
 
 	for (i = 0; i < n; i++) {
+		const struct rte_mbuf *m = pkts[i];
+		const struct ether_hdr *eh
+			= rte_pktmbuf_mtod(m, const struct ether_hdr *);
+
+		if (multicast_only &&
+		    !is_multicast_ether_addr(&eh->d_addr))
+			continue;
+
+		if (broadcast_only &&
+		    !is_broadcast_ether_addr(&eh->d_addr))
+			continue;
+
 		printf("[%u:%u] ",
 		       portid, queueid);
-
-		pkt_print(pkts[i]);
+		pkt_print(m);
 	}
 	fflush(stdout);
 }
@@ -530,8 +543,14 @@ static void parse_args(int argc, char **argv)
 	int opt;
 	unsigned int i;
 
-	while ((opt = getopt(argc, argv, "vidsfpq:")) != EOF) {
+	while ((opt = getopt(argc, argv, "vbmidsfpq:")) != EOF) {
 		switch (opt) {
+		case 'b':
+			broadcast_only = true;
+			break;
+		case 'm':
+			multicast_only = true;
+			break;
 		case 'i':
 			irq_mode = true;
 			break;
