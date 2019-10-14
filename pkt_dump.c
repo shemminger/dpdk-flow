@@ -8,6 +8,7 @@
 #include <arpa/inet.h>
 
 #include <rte_mbuf.h>
+#include <rte_arp.h>
 #include <rte_ip.h>
 #include <rte_udp.h>
 #include <rte_ether.h>
@@ -52,6 +53,7 @@ static void pkt_decode(char *str, size_t len,
 {
 	char src_str[INET6_ADDRSTRLEN], dst_str[INET6_ADDRSTRLEN];
 	char proto[128];
+	int cc;
 
 	switch (rte_be_to_cpu_16(eh->ether_type)) {
 	case RTE_ETHER_TYPE_IPV4: {
@@ -59,6 +61,7 @@ static void pkt_decode(char *str, size_t len,
 			= (const struct rte_ipv4_hdr *)(eh + 1);
 		const struct rte_udp_hdr *udp
 			= (const struct rte_udp_hdr *)(ip + 1);
+
 		uint16_t l4_proto = ip->next_proto_id;
 
 		inet_ntop(AF_INET, &ip->src_addr,
@@ -70,7 +73,6 @@ static void pkt_decode(char *str, size_t len,
 		    ntohs(udp->dst_port) == 4789) {
 			const struct rte_vxlan_hdr *vxlan;
 			uint32_t vni;
-			int cc;
 
 			vxlan = (const struct rte_vxlan_hdr *)(udp +1);
 			vni = rte_be_to_cpu_32(vxlan->vx_vni) >> 8;
@@ -107,12 +109,23 @@ static void pkt_decode(char *str, size_t len,
 		break;
 	}
 
-	case RTE_ETHER_TYPE_ARP:
-		strcpy(proto, "ARP");
-		/* fallthrough */
+	case RTE_ETHER_TYPE_ARP: {
+		const struct rte_arp_hdr *ah
+			= (const struct rte_arp_hdr *)(eh + 1);
+		uint16_t op = rte_be_to_cpu_16(ah->arp_opcode);
+
+		rte_ether_format_addr(src_str, sizeof(src_str), &eh->s_addr);
+		rte_ether_format_addr(dst_str, sizeof(dst_str), &eh->d_addr);
+
+		snprintf(proto, sizeof(proto), "ARP %s",
+			 op == RTE_ARP_OP_REQUEST ? "REQ" :
+			 op == RTE_ARP_OP_REPLY ? "REPLY" : "???");
+		break;
+	}
 	default:
 		rte_ether_format_addr(src_str, sizeof(src_str), &eh->s_addr);
 		rte_ether_format_addr(dst_str, sizeof(dst_str), &eh->d_addr);
+
 		snprintf(proto, sizeof(proto), "%#x", ntohs(eh->ether_type));
 	}
 
