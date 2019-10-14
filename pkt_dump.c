@@ -8,6 +8,7 @@
 #include <arpa/inet.h>
 
 #include <rte_mbuf.h>
+#include <rte_arp.h>
 #include <rte_ip.h>
 #include <rte_udp.h>
 #include <rte_ether.h>
@@ -47,14 +48,16 @@ static const char *ip_proto(uint16_t proto)
 	}
 }
 
-
 static void pkt_decode(char *str, size_t len,
 		       const struct ether_hdr *eh)
 {
 	char src_str[INET6_ADDRSTRLEN], dst_str[INET6_ADDRSTRLEN];
 	char proto[128];
+	uint16_t ether_type = eh->ether_type;
+	int cc;
 
-	switch (ntohs(eh->ether_type)) {
+redo_vlan:
+	switch (ntohs(ether_type)) {
 	case ETHER_TYPE_IPv4: {
 		const struct ipv4_hdr *ip
 			= (const struct ipv4_hdr *)(eh + 1);
@@ -71,7 +74,6 @@ static void pkt_decode(char *str, size_t len,
 		    ntohs(udp->dst_port) == 4789) {
 			const struct vxlan_hdr *vxlan;
 			uint32_t vni;
-			int cc;
 
 			vxlan = (const struct vxlan_hdr *)(udp +1);
 			vni = ntohl(vxlan->vx_vni) >> 8;
@@ -105,13 +107,33 @@ static void pkt_decode(char *str, size_t len,
 		break;
 	}
 
-	case ETHER_TYPE_ARP:
-		strcpy(proto, "ARP");
-		/* fallthrough */
-	default:
+	case ETHER_TYPE_ARP: {
+		const struct arp_hdr *ah
+			= (const struct arp_hdr *)(eh + 1);
+
 		ether_format_addr(src_str, ETHER_ADDR_FMT_SIZE, &eh->s_addr);
 		ether_format_addr(dst_str, ETHER_ADDR_FMT_SIZE, &eh->d_addr);
+
+		snprintf(proto, sizeof(proto), "ARP %s",
+			 ah->arp_op == ARP_OP_REQUEST ? "REQ" :
+			 ah->arp_op == ARP_OP_REPLY ? "REPLY" : "???");
+		break;
+	}
+
+	case ETHER_TYPE_VLAN: {
+		const struct vlan_hdr *vh
+			= (const struct vlan_hdr *)(eh + 1);
+
+		cc = snprintf(str, len, "VLAN %#x ", vh->vlan_tci);
+		str += cc;
+		len -= cc;
+		ether_type = vh->eth_proto;
+		goto redo_vlan;
+	}
+	default:
 		snprintf(proto, sizeof(proto), "%#x", ntohs(eh->ether_type));
+		ether_format_addr(src_str, ETHER_ADDR_FMT_SIZE, &eh->s_addr);
+		ether_format_addr(dst_str, ETHER_ADDR_FMT_SIZE, &eh->d_addr);
 	}
 
 	snprintf(str, len, "%s → %s %s",
