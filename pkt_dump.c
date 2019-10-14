@@ -115,8 +115,8 @@ redo_vlan:
 		ether_format_addr(dst_str, ETHER_ADDR_FMT_SIZE, &eh->d_addr);
 
 		snprintf(proto, sizeof(proto), "ARP %s",
-			 ah->arp_op == ARP_OP_REQUEST ? "REQ" :
-			 ah->arp_op == ARP_OP_REPLY ? "REPLY" : "???");
+			 htons(ah->arp_op) == ARP_OP_REQUEST ? "REQUEST" :
+			 htons(ah->arp_op) == ARP_OP_REPLY ? "REPLY" : "???");
 		break;
 	}
 
