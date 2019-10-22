@@ -176,7 +176,7 @@ flow_src_mac(uint16_t port, uint32_t id,
 	     struct rte_flow_error *err)
 {
 	struct rte_flow_attr attr  = {
-		.group = id,
+		.group = id + 1,
 		.priority = VNIC_SRC_MAC_PRIORITY,
 		.ingress = 1,
 	};
@@ -215,7 +215,7 @@ flow_dst_mac(uint16_t port, uint32_t id,
 	     struct rte_flow_error *err)
 {
 	struct rte_flow_attr attr  = {
-		.group = id,
+		.group = id + 1,
 		.priority = VNIC_DST_MAC_PRIORITY,
 		.ingress = 1,
 	};
@@ -246,9 +246,9 @@ flow_dst_mac(uint16_t port, uint32_t id,
 	return rte_flow_create(port, &attr, pattern, actions, err);
 }
 
-static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
+static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq,
+			   const struct rte_ether_addr *mac)
 {
-	const struct rte_ether_addr *mac = &vnic_mac[id];
 	uint16_t lastq = firstq + num_queue - 1;
 	uint16_t rss_queues[num_queue];
 	union {
@@ -601,7 +601,7 @@ assign_queues(uint16_t portid, uint16_t nrxq)
 
 int main(int argc, char **argv)
 {
-	unsigned int q, v, n;
+	unsigned int q, i, n, v;
 	uint16_t ntxq, nrxq;
 	int r;
 
@@ -637,8 +637,13 @@ int main(int argc, char **argv)
 	if (promisc)
 		rte_eth_promiscuous_enable(0);
 
-	for (v = 0, q = 1; v < num_vnic; v++, q += num_queue)
-		flow_configure(0, v, q);
+	v = 0;
+	q = 1;	/* queue 0 is reserved for no match */
+	for (i = 0; i < num_vnic; i++) {
+		flow_configure(0, v, q, &vnic_mac[i]);
+		v = 1u << i;
+		q += num_queue;
+	}
 
 	assign_queues(0, nrxq);
 
