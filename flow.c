@@ -176,7 +176,7 @@ flow_src_mac(uint16_t port, uint32_t id,
 	     struct rte_flow_error *err)
 {
 	struct rte_flow_attr attr  = {
-		.group = id,
+		.group = id + 1,
 		.priority = VNIC_SRC_MAC_PRIORITY,
 		.ingress = 1,
 	};
@@ -215,7 +215,7 @@ flow_dst_mac(uint16_t port, uint32_t id,
 	     struct rte_flow_error *err)
 {
 	struct rte_flow_attr attr  = {
-		.group = id,
+		.group = id + 1,
 		.priority = VNIC_DST_MAC_PRIORITY,
 		.ingress = 1,
 	};
