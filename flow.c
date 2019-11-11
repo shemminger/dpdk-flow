@@ -114,6 +114,12 @@ static void port_config(uint16_t portid, uint16_t ntxq, uint16_t nrxq)
 	if (irq_mode)
 		port_conf.intr_conf.rxq = 1;
 
+	if (num_queue > 1) {
+		/*use RSS params*/
+		port_conf.rxmode.mq_mode = ETH_MQ_RX_RSS;
+		port_conf.rx_adv_conf.rss_conf.rss_hf = ETH_RSS_IPV4;
+	}
+
 	printf("Configure %u Tx and %u Rx queues\n", ntxq, nrxq);
 	r = rte_eth_dev_configure(portid, nrxq, ntxq, &port_conf);
 	if (r < 0)
@@ -142,7 +148,7 @@ static void port_config(uint16_t portid, uint16_t ntxq, uint16_t nrxq)
 	}
 
 	for (q = 0; q < nrxq; q++) {
-		if (q > 0)
+		if (q >= num_queue)
 			rxq_conf.rx_deferred_start = 1;
 
 		r = rte_eth_rx_queue_setup(portid, q, nb_rxd, 0, &rxq_conf,
@@ -276,7 +282,9 @@ static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq)
 
 		action.rss = (struct rte_flow_action_rss) {
 			.types = VNIC_RSS_HASH_TYPES,
+			.key_len = 0x20,
 			.queue_num = num_queue,
+			.key = (const uint8_t*)("AB51732272382B3DBF4F482DE375187E"),
 			.queue = rss_queues,
 		};
 		actions[0] = (struct rte_flow_action) {
@@ -612,7 +620,12 @@ int main(int argc, char **argv)
 	parse_args(argc - r, argv + r);
 
 	ntxq = rte_lcore_count();
-	nrxq = num_vnic * num_queue + 1;
+
+	/* As per command line help,
+	 * Total num of queues will be including num_queues count on default
+	 * and non-default vnic.
+	 */
+	nrxq = (num_vnic + 1) * num_queue;
 
 	ticks_us = rte_get_tsc_hz() / US_PER_S;
 
@@ -637,7 +650,8 @@ int main(int argc, char **argv)
 	if (promisc)
 		rte_eth_promiscuous_enable(0);
 
-	for (v = 0, q = 1; v < num_vnic; v++, q += num_queue)
+	q = num_queue;	/* queue 0 to num_queue-1 is reserved for no match and belongs to default vnic0 */
+	for (v = 0; v < num_vnic; v++, q += num_queue)
 		flow_configure(0, v, q);
 
 	assign_queues(0, nrxq);
