@@ -335,27 +335,44 @@ dump_rx_pkt(uint16_t portid, uint16_t queueid,
 }
 
 static void
-show_stats(struct rte_timer *tm __rte_unused, void *arg __rte_unused)
+show_stats(struct rte_timer *tm __rte_unused, void *arg)
 {
-	unsigned int i, lcore_id;
+	unsigned int i = 0, lcore_id = 0;
 	struct rte_eth_stats stats;
+	struct lcore_conf *conf;
+	unsigned int q_count = 0;
+	uint16_t nrxq = *((uint16_t *) arg);
 
 	rte_eth_stats_get(0, &stats);
 
 	printf("%"PRIu64"/%"PRIu64, stats.ipackets, stats.ibytes);
 
-	RTE_LCORE_FOREACH(lcore_id) {
-		struct lcore_conf *conf = &lcore_conf[lcore_id];
+	/* Display stats in linear order from Q0 to Q(n-1)-
+	 * lcore0:rx_queue_list[0]
+	 * lcore1:rx_queue_list[0]
+	 * lcore2:rx_queue_list[0]
+	 * ...
+	 * lcore0:rx_queue_list[1]
+	 * lcore1:rx_queue_list[1]
+	 * lcore2:rx_queue_list[1]
+	 * ...
+	 */
+	while (q_count < nrxq) {
+		lcore_id = 0;
+		RTE_LCORE_FOREACH(lcore_id) {
+			conf = &lcore_conf[lcore_id];
 
-		for (i = 0; i < conf->n_rx; i++) {
+			if (i+1 > conf->n_rx)
+				break;
 			struct rx_queue *rxq = &conf->rx_queue_list[i];
 
 			printf(" %u:%"PRIu64,
-			       rxq->queue_id, rxq->rx_packets);
+				rxq->queue_id, rxq->rx_packets);
+			q_count++;
 		}
+		i++;
 	}
 	printf("\n");
-
 	fflush(stdout);
 }
 
@@ -660,7 +677,7 @@ int main(int argc, char **argv)
 	rte_timer_reset(&stat_timer,
 			STAT_INTERVAL * rte_get_timer_hz(),
 			PERIODICAL, rte_get_master_lcore(),
-			show_stats, NULL);
+			show_stats, &nrxq);
 
 	printf("\n%-14s: %8s/%-10s | per-queue\n",
 	       "Time", "Packets", "Bytes");
