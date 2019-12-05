@@ -27,10 +27,6 @@
 #include "rte_flow_dump.h"
 #include "pkt_dump.h"
 
-static unsigned int num_vnic;
-static struct rte_ether_addr *vnic_mac;
-static unsigned int num_queue = 1;
-
 #define NUM_MBUFS	   131071
 #define MEMPOOL_CACHE	   256
 #define RX_DESC_DEFAULT	   256
@@ -44,6 +40,10 @@ static unsigned int num_queue = 1;
 #define FLOW_SRC_MODE	1
 #define FLOW_DST_MODE	2
 
+static unsigned int num_vnic;
+static struct rte_ether_addr *vnic_mac;
+static unsigned int num_queue = 1;
+static unsigned int total_num_mbufs = NUM_MBUFS;
 static bool flow_dump = false;
 static bool irq_mode = false;
 static bool details = false;
@@ -535,13 +535,14 @@ static void print_mac(uint16_t portid)
 
 static void usage(const char *argv0)
 {
-	printf("Usage: %s [EAL options] -- -[idsfpv] -q NQ MAC1 MAC2 ...\n"
+	printf("Usage: %s [EAL options] -- -[idsfpv] -[t Nmbufs] -q NQ MAC1 MAC2 ...\n"
 	       "  -i      IRQ mode\n"
 	       "  -d      destination mac only match\n"
 	       "  -s      source mac only match\n"
 	       "  -f      flow dump\n"
 	       "  -p      don't put interface in promicious\n"
 	       "  -q  NQ  number of queues per Vnic\n"
+	       "  -t  Nmbufs total number of mbufs\n"
 	       "  -v      print packet details\n",
 	       argv0);
 	exit(1);
@@ -552,7 +553,7 @@ static void parse_args(int argc, char **argv)
 	int opt;
 	unsigned int i;
 
-	while ((opt = getopt(argc, argv, "vidsfpq:")) != EOF) {
+	while ((opt = getopt(argc, argv, "vidsfpq:t:")) != EOF) {
 		switch (opt) {
 		case 'i':
 			irq_mode = true;
@@ -565,6 +566,11 @@ static void parse_args(int argc, char **argv)
 			break;
 		case 'q':
 			num_queue = atoi(optarg);
+			break;
+		case 't':
+			/* To support more queues, need to use higher value in
+			 * total_num_mbufs */
+			total_num_mbufs = atoi(optarg);
 			break;
 		case 'f':
 			flow_dump = true;
@@ -654,11 +660,12 @@ int main(int argc, char **argv)
 		rte_exit(EXIT_FAILURE,
 			 "Expect one external port (got %u)\n", n);
 
-	mb_pool = rte_pktmbuf_pool_create("mb_pool", NUM_MBUFS,
+	mb_pool = rte_pktmbuf_pool_create("mb_pool", total_num_mbufs,
 					  MEMPOOL_CACHE, 0,
 					  RTE_MBUF_DEFAULT_BUF_SIZE, 0);
 	if (!mb_pool)
 		rte_exit(EXIT_FAILURE, "Cannot init mbuf pool\n");
+	printf("total mbufs in pool %u\n", total_num_mbufs);
 
 	rte_timer_subsystem_init();
 
