@@ -23,7 +23,6 @@
 #include <rte_timer.h>
 #include <rte_cycles.h>
 
-#include "eth_compat.h"
 #include "rte_flow_dump.h"
 #include "pkt_dump.h"
 

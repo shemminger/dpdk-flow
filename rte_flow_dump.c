@@ -6,7 +6,6 @@
 #include <stdio.h>
 #include <rte_flow.h>
 
-#include "eth_compat.h"
 #include "rte_flow_dump.h"
 
 void
