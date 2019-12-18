@@ -45,7 +45,7 @@ static unsigned int num_queue = 1;
 
 static bool flow_dump = false;
 static bool irq_mode = false;
-static bool details = false;
+static unsigned int details;
 static bool promisc = true;
 static unsigned long flow_mode = FLOW_SRC_MODE | FLOW_DST_MODE;
 static uint32_t ticks_us;
@@ -310,15 +310,34 @@ static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq,
 	}
 }
 
+static uint64_t time_monotonic(void)
+{
+	static uint64_t start;
+	struct timespec ts;
+	uint64_t ns;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	ns = ts.tv_sec * NS_PER_S + ts.tv_nsec;
+
+	if (start)
+		return ns - start;
+	start = ns;
+	return 0;
+}
+
 static void
 dump_rx_pkt(uint16_t portid, uint16_t queueid,
 	    struct rte_mbuf *pkts[], uint16_t n)
 {
+	static unsigned int pktno;
+	uint64_t us = time_monotonic() / 1000;
 	uint16_t i;
 
 	for (i = 0; i < n; i++) {
-		printf("[%u:%u] ",
-		       portid, queueid);
+		printf("[%u:%u] ", portid, queueid);
+		if (details > 1)
+			printf("%-6u %"PRId64".%06"PRId64,
+			       ++pktno, us / US_PER_S, us % US_PER_S);
 
 		pkt_print(pkts[i]);
 	}
@@ -454,10 +473,9 @@ rx_thread(void *arg __rte_unused)
 	struct lcore_conf *c = &lcore_conf[core_id];
 	uint64_t idle_start = 0;
 
-	if (c->n_rx == 0) {
-		fprintf(stderr, "core %u: no rx assigned\n", core_id);
+	/* no need for rx thread if no queues  */
+	if (c->n_rx == 0)
 		return 0;
-	}
 
 	if (irq_mode)
 		event_register(c);
@@ -547,7 +565,7 @@ static void parse_args(int argc, char **argv)
 			promisc = false;
 			break;
 		case 'v':
-			details = true;
+			++details;
 			break;
 		default:
 			fprintf(stderr, "Unknown option\n");
@@ -646,14 +664,16 @@ int main(int argc, char **argv)
 
 	assign_queues(0, nrxq);
 
-	rte_timer_init(&stat_timer);
-	rte_timer_reset(&stat_timer,
-			STAT_INTERVAL * rte_get_timer_hz(),
-			PERIODICAL, rte_get_master_lcore(),
-			show_stats, NULL);
+	if (!details) {
+		rte_timer_init(&stat_timer);
+		rte_timer_reset(&stat_timer,
+				STAT_INTERVAL * rte_get_timer_hz(),
+				PERIODICAL, rte_get_master_lcore(),
+				show_stats, NULL);
 
-	printf("\n%-14s: %8s/%-10s | per-queue\n",
-	       "Time", "Packets", "Bytes");
+		printf("\n%-14s: %8s/%-10s | per-queue\n",
+		       "Time", "Packets", "Bytes");
+	}
 
 	r = rte_eal_mp_remote_launch(rx_thread, NULL, CALL_MASTER);
 	if (r < 0)
