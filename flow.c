@@ -17,6 +17,7 @@
 #include <getopt.h>
 
 #include <rte_ethdev.h>
+#include <rte_ether.h>
 #include <rte_mbuf.h>
 #include <rte_flow.h>
 #include <rte_lcore.h>
@@ -198,11 +199,13 @@ flow_src_mac(uint16_t port, uint32_t id,
 		},
 		{ .type = RTE_FLOW_ITEM_TYPE_END },
 	};
+	char ebuf[RTE_ETHER_ADDR_FMT_SIZE];
 
-	if (flow_dump) {
-		printf("flow-demo: Creating src MAC filter!!\n");
+	rte_ether_format_addr(ebuf, sizeof(ebuf), mac);
+	printf("Matching on src MAC %s\n", ebuf);
+
+	if (flow_dump)
 		rte_flow_dump(stdout, &attr, pattern, actions);
-	}
 
 	return rte_flow_create(port, &attr, pattern, actions, err);
 }
@@ -237,11 +240,14 @@ flow_dst_mac(uint16_t port, uint32_t id,
 		},
 		{ .type = RTE_FLOW_ITEM_TYPE_END },
 	};
+	char ebuf[RTE_ETHER_ADDR_FMT_SIZE];
 
-	if (flow_dump) {
-		printf("flow-demo: Creating dst MAC filter!!\n");
+	rte_ether_format_addr(ebuf, sizeof(ebuf), mac);
+	printf("Matching on dst MAC %s\n", ebuf);
+
+	if (flow_dump)
 		rte_flow_dump(stdout, &attr, pattern, actions);
-	}
+
 	return rte_flow_create(port, &attr, pattern, actions, err);
 }
 
