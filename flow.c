@@ -46,8 +46,10 @@ static unsigned int num_queue = 1;
 
 static bool flow_dump = false;
 static bool irq_mode = false;
+static bool any_mode = false;
 static unsigned int details;
 static bool promisc = true;
+static bool rss_enabled;
 static unsigned long flow_mode = FLOW_SRC_MODE | FLOW_DST_MODE;
 static uint32_t ticks_us;
 static struct rte_timer stat_timer;
@@ -96,7 +98,7 @@ static void port_config(uint16_t portid, uint16_t ntxq, uint16_t nrxq)
 	struct rte_eth_rxconf rxq_conf;
 	uint16_t nb_rxd = RX_DESC_DEFAULT;
 	uint16_t nb_txd = TX_DESC_DEFAULT;
-	uint16_t q;
+	uint16_t firstq, q;
 	int r;
 
 	rte_eth_dev_info_get(portid, &dev_info);
@@ -113,6 +115,8 @@ static void port_config(uint16_t portid, uint16_t ntxq, uint16_t nrxq)
 
 	if (irq_mode)
 		port_conf.intr_conf.rxq = 1;
+	if (rss_enabled)
+		port_conf.rxmode.mq_mode = ETH_MQ_RX_RSS;
 
 	printf("Configure %u Tx and %u Rx queues\n", ntxq, nrxq);
 	r = rte_eth_dev_configure(portid, nrxq, ntxq, &port_conf);
@@ -141,8 +145,9 @@ static void port_config(uint16_t portid, uint16_t ntxq, uint16_t nrxq)
 				 r);
 	}
 
+	firstq = rss_enabled ? rte_lcore_count() : 1;
 	for (q = 0; q < nrxq; q++) {
-		if (q > 0)
+		if (q >= firstq)
 			rxq_conf.rx_deferred_start = 1;
 
 		r = rte_eth_rx_queue_setup(portid, q, nb_rxd, 0, &rxq_conf,
@@ -181,33 +186,39 @@ flow_src_mac(uint16_t port, uint32_t id,
 		.ingress = 1,
 	};
 	static const struct rte_flow_item_eth eth_src_mask = {
-	      .src.addr_bytes = "\xff\xff\xff\xff\xff\xff",
+		.src.addr_bytes = "\xff\xff\xff\xff\xff\xff",
 	};
 	struct rte_flow_item_eth vnic_eth_src = {
 		.src = *mac,
 	};
-	struct rte_flow_item pattern[] = {
-		{
+	struct rte_flow_item patterns[2];
+	struct rte_flow_item *pat = patterns;
+	char ebuf[RTE_ETHER_ADDR_FMT_SIZE];
+
+	if (any_mode) {
+		*pat++ = (struct rte_flow_item) {
 			.type = RTE_FLOW_ITEM_TYPE_ANY,
 			.spec = &inner_flow,
 			.mask = &any_mask,
-		},
-		{
-			.type = RTE_FLOW_ITEM_TYPE_ETH,
-			.spec = &vnic_eth_src,
-			.mask = &eth_src_mask,
-		},
-		{ .type = RTE_FLOW_ITEM_TYPE_END },
+		};
 	};
-	char ebuf[RTE_ETHER_ADDR_FMT_SIZE];
+
+	*pat++ = (struct rte_flow_item) {
+		.type = RTE_FLOW_ITEM_TYPE_ETH,
+		.spec = &vnic_eth_src,
+		.mask = &eth_src_mask,
+	};
+
+	*pat = (struct rte_flow_item){ .type = RTE_FLOW_ITEM_TYPE_END };
 
 	rte_ether_format_addr(ebuf, sizeof(ebuf), mac);
-	printf("Matching on src MAC %s\n", ebuf);
+	printf("Matching on %ssrc MAC %s\n",
+	       any_mode ? "any ": "", ebuf);
 
 	if (flow_dump)
-		rte_flow_dump(stdout, &attr, pattern, actions);
+		rte_flow_dump(stdout, &attr, patterns, actions);
 
-	return rte_flow_create(port, &attr, pattern, actions, err);
+	return rte_flow_create(port, &attr, patterns, actions, err);
 }
 
 static struct rte_flow *
@@ -225,30 +236,37 @@ flow_dst_mac(uint16_t port, uint32_t id,
 		.dst = *mac,
 	};
 	static const struct rte_flow_item_eth eth_dst_mask = {
-	      .dst.addr_bytes = "\xff\xff\xff\xff\xff\xff",
+		.dst.addr_bytes = "\xff\xff\xff\xff\xff\xff",
 	};
-	struct rte_flow_item pattern[] = {
-		{
+	struct rte_flow_item patterns[3];
+	struct rte_flow_item *pat = patterns;
+	char ebuf[RTE_ETHER_ADDR_FMT_SIZE];
+
+
+	if (any_mode) {
+		*pat++ = (struct rte_flow_item) {
 			.type = RTE_FLOW_ITEM_TYPE_ANY,
 			.spec = &inner_flow,
 			.mask = &any_mask,
-		},
-		{
-			.type = RTE_FLOW_ITEM_TYPE_ETH,
-			.spec = &vnic_eth_dst,
-			.mask = &eth_dst_mask,
-		},
-		{ .type = RTE_FLOW_ITEM_TYPE_END },
+		};
 	};
-	char ebuf[RTE_ETHER_ADDR_FMT_SIZE];
+
+	*pat++ = (struct rte_flow_item) {
+		.type = RTE_FLOW_ITEM_TYPE_ETH,
+		.spec = &vnic_eth_dst,
+		.mask = &eth_dst_mask,
+	};
+
+	*pat = (struct rte_flow_item){ .type = RTE_FLOW_ITEM_TYPE_END };
 
 	rte_ether_format_addr(ebuf, sizeof(ebuf), mac);
-	printf("Matching on dst MAC %s\n", ebuf);
+	printf("Matching on %sdst MAC %s\n",
+	       any_mode ? "any ": "", ebuf);
 
 	if (flow_dump)
-		rte_flow_dump(stdout, &attr, pattern, actions);
+		rte_flow_dump(stdout, &attr, patterns, actions);
 
-	return rte_flow_create(port, &attr, pattern, actions, err);
+	return rte_flow_create(port, &attr, patterns, actions, err);
 }
 
 static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq,
@@ -533,25 +551,42 @@ static void print_mac(uint16_t portid)
 
 static void usage(const char *argv0)
 {
-	printf("Usage: %s [EAL options] -- -[idsfpv] -q NQ MAC1 MAC2 ...\n"
-	       "  -i      IRQ mode\n"
-	       "  -d      destination mac only match\n"
-	       "  -s      source mac only match\n"
-	       "  -f      flow dump\n"
-	       "  -p      don't put interface in promicious\n"
-	       "  -q  NQ  number of queues per Vnic\n"
-	       "  -v      print packet details\n",
+	printf("Usage: %s [EAL options] -- [OPTIONS] MAC1 MAC2 ...\n"
+	       "  -a,--any       match any level\n"
+	       "  -i,--irq       IRQ mode\n"
+	       "  -d,--dst       destination mac only match\n"
+	       "  -s,--src       source mac only match\n"
+	       "  -f,--flow      flow dump\n"
+	       "  -p             don't put interface in promicious\n"
+	       "  -q,--queue  N  number of queues per Vnic\n"
+	       "  -r,--rss       enable RSS\n"
+	       "  -v,--details   print packet details\n",
 	       argv0);
 	exit(1);
 }
 
+static const struct option longopts[] = {
+	{ "irq",	no_argument, 0, 'i' },
+	{ "dst",	no_argument, 0, 'd' },
+	{ "src",	no_argument, 0, 's' },
+	{ "flow",	no_argument, 0, 'f' },
+	{ "queue",	no_argument, 0, 'q' },
+	{ "rss",	no_argument, 0, 'r' },
+	{ "any",	no_argument, 0, 'a' },
+	{ 0 }
+};
+
 static void parse_args(int argc, char **argv)
 {
-	int opt;
 	unsigned int i;
+	int opt;
 
-	while ((opt = getopt(argc, argv, "vidsfpq:")) != EOF) {
+	while ((opt = getopt_long(argc, argv, "vidsfpq:r",
+				  longopts, NULL)) != EOF) {
 		switch (opt) {
+		case 'a':
+			any_mode = true;
+			break;
 		case 'i':
 			irq_mode = true;
 			break;
@@ -569,6 +604,9 @@ static void parse_args(int argc, char **argv)
 			break;
 		case 'p':
 			promisc = false;
+			break;
+		case 'r':
+			rss_enabled = true;
 			break;
 		case 'v':
 			++details;
@@ -661,7 +699,8 @@ int main(int argc, char **argv)
 		rte_eth_promiscuous_enable(0);
 
 	v = 0;
-	q = 1;	/* queue 0 is reserved for no match */
+
+	q = rss_enabled ? rte_lcore_count() : 1;
 	for (i = 0; i < num_vnic; i++) {
 		flow_configure(0, v, q, &vnic_mac[i]);
 		v = 1u << i;
