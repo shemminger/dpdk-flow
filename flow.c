@@ -673,7 +673,10 @@ int main(int argc, char **argv)
 	parse_args(argc - r, argv + r);
 
 	ntxq = rte_lcore_count();
-	nrxq = num_vnic * num_queue + 1;
+	if (rss_enabled)
+		nrxq = (num_vnic + 1) * num_queue;
+	else
+		nrxq =  1 + num_vnic * num_queue;
 
 	ticks_us = rte_get_tsc_hz() / US_PER_S;
 
@@ -698,11 +701,15 @@ int main(int argc, char **argv)
 	if (promisc)
 		rte_eth_promiscuous_enable(0);
 
+	/* v is the vnic id, starts with 0.
+	 * q is the queue, starts after default queue
+	 */
 	v = 0;
-
 	q = rss_enabled ? rte_lcore_count() : 1;
 	for (i = 0; i < num_vnic; i++) {
 		flow_configure(0, v, q, &vnic_mac[i]);
+
+		/* force non-sequential id to force bug detection */
 		v = 1u << i;
 		q += num_queue;
 	}
