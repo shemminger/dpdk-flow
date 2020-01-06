@@ -31,7 +31,6 @@ static unsigned int num_vnic;
 static struct rte_ether_addr *vnic_mac;
 static unsigned int num_queue = 1;
 
-#define NUM_MBUFS	   131071
 #define MEMPOOL_CACHE	   256
 #define RX_DESC_DEFAULT	   256
 #define TX_DESC_DEFAULT	   512
@@ -40,6 +39,7 @@ static unsigned int num_queue = 1;
 #define IDLE_POLL_US	   10
 #define MAX_EVENTS	   16
 #define STAT_INTERVAL      10
+#define PKTMBUF_POOL_RESERVED 128
 
 #define FLOW_SRC_MODE	1
 #define FLOW_DST_MODE	2
@@ -669,6 +669,7 @@ assign_queues(uint16_t portid, uint16_t nrxq)
 int main(int argc, char **argv)
 {
 	unsigned int q, i, n, v;
+	unsigned int num_mbufs, obj_size;
 	uint16_t ntxq, nrxq;
 	int r;
 
@@ -694,11 +695,25 @@ int main(int argc, char **argv)
 		rte_exit(EXIT_FAILURE,
 			 "Expect one external port (got %u)\n", n);
 
-	mb_pool = rte_pktmbuf_pool_create("mb_pool", NUM_MBUFS,
+	num_mbufs =
+		rte_align32pow2(nrxq * RX_DESC_DEFAULT  * 3)
+		+ ntxq * (TX_DESC_DEFAULT + MAX_PKT_BURST)
+		+ rte_lcore_count() * (MEMPOOL_CACHE + MAX_PKT_BURST)
+		+ PKTMBUF_POOL_RESERVED;
+	/* rte_pktmbuf_pool_create is optimum with 2^q - 1 */
+	num_mbufs = rte_align32pow2(num_mbufs + 1) - 1;
+
+	mb_pool = rte_pktmbuf_pool_create("mb_pool", num_mbufs,
 					  MEMPOOL_CACHE, 0,
 					  RTE_MBUF_DEFAULT_BUF_SIZE, 0);
 	if (!mb_pool)
 		rte_exit(EXIT_FAILURE, "Cannot init mbuf pool\n");
+
+	obj_size = rte_mempool_calc_obj_size(RTE_MBUF_DEFAULT_BUF_SIZE,
+					     0, NULL);
+	printf("mbuf pool %u of %u bytes = %uMb\n",
+		num_mbufs, obj_size,
+		(num_mbufs * obj_size) / (1024 * 1024));
 
 	rte_timer_subsystem_init();
 
