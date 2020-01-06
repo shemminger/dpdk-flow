@@ -297,6 +297,7 @@ static void flow_configure(uint16_t portid, uint16_t id, uint16_t firstq,
 		for (i = 0; i < num_queue; i++)
 			rss_queues[i] = firstq + i;
 
+		/* Do RSS over N queues using the default RSS key */
 		action.rss = (struct rte_flow_action_rss) {
 			.types = VNIC_RSS_HASH_TYPES,
 			.queue_num = num_queue,
@@ -369,27 +370,32 @@ dump_rx_pkt(uint16_t portid, uint16_t queueid,
 }
 
 static void
-show_stats(struct rte_timer *tm __rte_unused, void *arg __rte_unused)
+show_stats(struct rte_timer *tm __rte_unused, void *arg)
 {
-	unsigned int i, lcore_id;
+	unsigned long nrxq = (unsigned long)arg;
+	unsigned int q, i, lcore_id;
 	struct rte_eth_stats stats;
 
 	rte_eth_stats_get(0, &stats);
 
 	printf("%"PRIu64"/%"PRIu64, stats.ipackets, stats.ibytes);
 
-	RTE_LCORE_FOREACH(lcore_id) {
-		struct lcore_conf *conf = &lcore_conf[lcore_id];
+	for (q = 0; q < nrxq; q++) {
+		RTE_LCORE_FOREACH(lcore_id) {
+			struct lcore_conf *conf = &lcore_conf[lcore_id];
 
-		for (i = 0; i < conf->n_rx; i++) {
-			struct rx_queue *rxq = &conf->rx_queue_list[i];
+			for (i = 0; i < conf->n_rx; i++) {
+				struct rx_queue *rxq = &conf->rx_queue_list[i];
 
-			printf(" %u:%"PRIu64,
-			       rxq->queue_id, rxq->rx_packets);
+				if (rxq->queue_id == q) {
+					printf(" %u@%u:%"PRIu64,
+					       q, lcore_id, rxq->rx_packets);
+					break;
+				}
+			}
 		}
 	}
 	printf("\n");
-
 	fflush(stdout);
 }
 
@@ -721,7 +727,7 @@ int main(int argc, char **argv)
 		rte_timer_reset(&stat_timer,
 				STAT_INTERVAL * rte_get_timer_hz(),
 				PERIODICAL, rte_get_master_lcore(),
-				show_stats, NULL);
+				show_stats, (void *)(unsigned long)nrxq);
 
 		printf("\n%-14s: %8s/%-10s | per-queue\n",
 		       "Time", "Packets", "Bytes");
