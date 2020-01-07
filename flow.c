@@ -683,10 +683,8 @@ int main(int argc, char **argv)
 	parse_args(argc - r, argv + r);
 
 	ntxq = rte_lcore_count();
-	if (rss_enabled)
-		nrxq = (num_vnic + 1) * num_queue;
-	else
-		nrxq =  1 + num_vnic * num_queue;
+	nrxq = num_vnic * num_queue;
+	nrxq += rss_enabled ? rte_lcore_count() : 1;
 
 	ticks_us = rte_get_tsc_hz() / US_PER_S;
 
