@@ -118,7 +118,10 @@ static void port_config(uint16_t portid, uint16_t ntxq, uint16_t nrxq)
 	if (rss_enabled)
 		port_conf.rxmode.mq_mode = ETH_MQ_RX_RSS;
 
-	printf("Configure %u Tx and %u Rx queues\n", ntxq, nrxq);
+	printf("Configure %u Tx and %u Rx queues (RSS %s)\n",
+	       ntxq, nrxq,
+	       (port_conf.rxmode.mq_mode & ETH_MQ_RX_RSS_FLAG) ? "enabled" : "disabled");
+
 	r = rte_eth_dev_configure(portid, nrxq, ntxq, &port_conf);
 	if (r < 0)
 		rte_exit(EXIT_FAILURE,
