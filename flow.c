@@ -590,7 +590,7 @@ static void parse_args(int argc, char **argv)
 	unsigned int i;
 	int opt;
 
-	while ((opt = getopt_long(argc, argv, "vidsfpq:r",
+	while ((opt = getopt_long(argc, argv, "avidsfpq:r",
 				  longopts, NULL)) != EOF) {
 		switch (opt) {
 		case 'a':
