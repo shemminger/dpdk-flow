@@ -62,7 +62,6 @@ static struct rte_timer stat_timer;
 #define VNIC_SRC_MAC_PRIORITY	1
 #define VNIC_DST_MAC_PRIORITY	2
 #define MCAST_PRIORITY  	10
-#define DEFAULT_PRIORITY	20
 #define DEFAULT_GROUP		255
 
 struct lcore_conf {
@@ -677,8 +676,8 @@ assign_queues(uint16_t portid, uint16_t nrxq)
 }
 
 /* drop all Ethernet packets except broadcast/multicast */
-static void
-flow_drop_unknown(uint16_t port)
+static struct rte_flow *
+flow_drop_unknown(uint16_t port, struct rte_flow_error *err)
 {
 	const struct rte_flow_attr attr  = {
 		.group = DEFAULT_GROUP,
@@ -705,24 +704,20 @@ flow_drop_unknown(uint16_t port)
 		{ .type = RTE_FLOW_ACTION_TYPE_DROP  },
 		{ .type = RTE_FLOW_ACTION_TYPE_END   }
 	};
-	struct rte_flow_error err;
 
 	printf("Dropping unknown Unicast packets\n");
 
 	if (flow_dump)
 		rte_flow_dump(stdout, &attr, patterns, actions);
 
-	if (rte_flow_create(port, &attr, patterns, actions, &err) != 0)
-		rte_exit(EXIT_FAILURE,
-			 "drop unicast flow create failed: %s\n error type %u %s\n",
-			 rte_strerror(rte_errno), err.type, err.message);
-
+	return rte_flow_create(port, &attr, patterns, actions, err);
 }
 
 int main(int argc, char **argv)
 {
 	unsigned int q, i, n, v;
 	unsigned int num_mbufs, obj_size;
+	struct rte_flow_error err;
 	uint16_t ntxq, nrxq;
 	int r;
 
@@ -788,8 +783,11 @@ int main(int argc, char **argv)
 		q += num_queue;
 	}
 
-	if (promisc && unknown_drop)
-		flow_drop_unknown(0);
+	if (promisc && unknown_drop &&
+	    flow_drop_unknown(0, &err) == NULL)
+		rte_exit(EXIT_FAILURE,
+			 "drop unicast flow create failed: %s\n error type %u %s\n",
+			 rte_strerror(rte_errno), err.type, err.message);
 
 	assign_queues(0, nrxq);
 
