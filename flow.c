@@ -47,6 +47,7 @@ static unsigned int num_queue = 1;
 static bool flow_dump = false;
 static bool irq_mode = false;
 static bool any_mode = false;
+static bool unknown_drop = false;
 static unsigned int details;
 static bool promisc = true;
 static bool rss_enabled;
@@ -60,6 +61,9 @@ static struct rte_timer stat_timer;
 
 #define VNIC_SRC_MAC_PRIORITY	1
 #define VNIC_DST_MAC_PRIORITY	2
+#define MCAST_PRIORITY  	10
+#define DEFAULT_PRIORITY	20
+#define DEFAULT_GROUP		255
 
 struct lcore_conf {
 	uint16_t n_rx;
@@ -590,11 +594,14 @@ static void parse_args(int argc, char **argv)
 	unsigned int i;
 	int opt;
 
-	while ((opt = getopt_long(argc, argv, "avidsfpq:r",
+	while ((opt = getopt_long(argc, argv, "avidsfpq:ru",
 				  longopts, NULL)) != EOF) {
 		switch (opt) {
 		case 'a':
 			any_mode = true;
+			break;
+		case 'u':
+			unknown_drop = true;
 			break;
 		case 'i':
 			irq_mode = true;
@@ -669,6 +676,49 @@ assign_queues(uint16_t portid, uint16_t nrxq)
 	}
 }
 
+/* drop all Ethernet packets except broadcast/multicast */
+static void
+flow_drop_unknown(uint16_t port)
+{
+	const struct rte_flow_attr attr  = {
+		.group = DEFAULT_GROUP,
+		.priority = MCAST_PRIORITY,
+		.ingress = 1,
+	};
+	const struct rte_flow_item_eth mcast_eth = {
+		.dst.addr_bytes = { RTE_ETHER_GROUP_ADDR, 0, 0, 0, 0, 0 },
+	};
+	const struct rte_flow_item_eth zero_eth = {
+		.dst.addr_bytes = { 0, 0, 0, 0, 0, 0 },
+	};
+	const struct rte_flow_item patterns[] = {
+		{
+			.type = RTE_FLOW_ITEM_TYPE_ETH,
+			.spec = &zero_eth,
+			.mask = &mcast_eth,
+		},
+		{
+			.type = RTE_FLOW_ITEM_TYPE_END
+		}
+	};
+	const struct rte_flow_action actions[] = {
+		{ .type = RTE_FLOW_ACTION_TYPE_DROP  },
+		{ .type = RTE_FLOW_ACTION_TYPE_END   }
+	};
+	struct rte_flow_error err;
+
+	printf("Dropping unknown Unicast packets\n");
+
+	if (flow_dump)
+		rte_flow_dump(stdout, &attr, patterns, actions);
+
+	if (rte_flow_create(port, &attr, patterns, actions, &err) != 0)
+		rte_exit(EXIT_FAILURE,
+			 "drop unicast flow create failed: %s\n error type %u %s\n",
+			 rte_strerror(rte_errno), err.type, err.message);
+
+}
+
 int main(int argc, char **argv)
 {
 	unsigned int q, i, n, v;
@@ -720,8 +770,10 @@ int main(int argc, char **argv)
 
 	port_config(0, ntxq, nrxq);
 	print_mac(0);
-	if (promisc)
+	if (promisc) {
+		printf("Enabling promicious mode\n");
 		rte_eth_promiscuous_enable(0);
+	}
 
 	/* v is the vnic id, starts with 0.
 	 * q is the queue, starts after default queue
@@ -735,6 +787,9 @@ int main(int argc, char **argv)
 		v = 1u << i;
 		q += num_queue;
 	}
+
+	if (promisc && unknown_drop)
+		flow_drop_unknown(0);
 
 	assign_queues(0, nrxq);
 
