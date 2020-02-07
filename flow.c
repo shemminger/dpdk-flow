@@ -739,6 +739,15 @@ int main(int argc, char **argv)
 	print_mac(0);
 	if (promisc)
 		rte_eth_promiscuous_enable(0);
+	else {
+		for (i = 0; i < num_vnic; i++) {
+			r = rte_eth_dev_mac_addr_add(0, &vnic_mac[i], 0);
+			if (r < 0)
+				rte_exit(EXIT_FAILURE,
+					 "Add mac address failed: %s\n",
+					 strerror(-r));
+		}
+	}
 
 	/* v is the vnic id, starts with 0.
 	 * q is the queue, starts after default queue
@@ -772,6 +781,12 @@ int main(int argc, char **argv)
 
 	if (promisc)
 		rte_eth_promiscuous_disable(0);
+	else {
+		for (i = 0; i < num_vnic; i++) {
+			rte_eth_dev_mac_addr_remove(0, &vnic_mac[i]);
+		}
+	}
+
 	rte_eth_dev_stop(0);
 	rte_eth_dev_close(0);
 
