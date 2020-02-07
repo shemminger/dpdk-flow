@@ -58,8 +58,25 @@ static struct rte_timer stat_timer;
 	(ETH_RSS_IPV4 | ETH_RSS_NONFRAG_IPV4_TCP | ETH_RSS_NONFRAG_IPV4_UDP | \
 	 ETH_RSS_IPV6 | ETH_RSS_NONFRAG_IPV6_TCP | ETH_RSS_NONFRAG_IPV6_UDP)
 
+/*
+ * Comment from rte_flow.h on meaning of priorities:
+ *
+ * Priorities are set on a per rule based within groups.
+ *
+ * Lower values denote higher priority, the highest priority for a flow rule
+ * is 0, so that a flow that matches for than one rule, the rule with the
+ * lowest priority value will always be matched.
+ *
+ * Although optional, applications are encouraged to group similar rules as
+ * much as possible to fully take advantage of hardware capabilities
+ * (e.g. optimized matching) and work around limitations (e.g. a single
+ * pattern type possibly allowed in a given group). Applications should be
+ * aware that groups are not linked by default, and that they must be
+ * explicitly linked by the application using the JUMP action.
+ */
+
 #define VNIC_SRC_MAC_PRIORITY	1
-#define VNIC_DST_MAC_PRIORITY	2
+#define VNIC_DST_MAC_PRIORITY	65536
 
 struct lcore_conf {
 	uint16_t n_rx;
