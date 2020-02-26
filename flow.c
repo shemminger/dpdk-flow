@@ -47,6 +47,7 @@ static unsigned int num_queue = 1;
 static bool flow_dump = false;
 static bool irq_mode = false;
 static bool any_mode = false;
+static bool random_mac = false;
 static unsigned int details;
 static bool promisc = true;
 static bool rss_enabled;
@@ -118,7 +119,11 @@ static void port_config(uint16_t portid, uint16_t ntxq, uint16_t nrxq)
 	uint16_t firstq, q;
 	int r;
 
-	rte_eth_dev_info_get(portid, &dev_info);
+	r = rte_eth_dev_info_get(portid, &dev_info);
+	if (r < 0)
+		rte_exit(EXIT_FAILURE,
+			 "Could not get device information for port %u\n",
+			 portid);
 
 	if (ntxq > dev_info.max_tx_queues)
 		rte_exit(EXIT_FAILURE,
@@ -129,6 +134,20 @@ static void port_config(uint16_t portid, uint16_t ntxq, uint16_t nrxq)
 		rte_exit(EXIT_FAILURE,
 			 "Not enough receive queues %u > %u\n",
 			nrxq, dev_info.max_rx_queues);
+
+	if (random_mac) {
+		struct rte_ether_addr mac;
+		char ebuf[RTE_ETHER_ADDR_FMT_SIZE];
+
+		rte_eth_random_addr(mac.addr_bytes);
+		rte_ether_format_addr(ebuf, sizeof(ebuf), &mac);
+		printf("MAC: %s\n", ebuf);
+
+		r = rte_eth_dev_default_mac_addr_set(portid, &mac);
+		if (r < 0)
+			rte_exit(EXIT_FAILURE,
+				 "mac_addr_set failed: %d\n", r);
+	}
 
 	if (irq_mode)
 		port_conf.intr_conf.rxq = 1;
@@ -586,6 +605,7 @@ static void usage(const char *argv0)
 	       "  -p             don't put interface in promicious\n"
 	       "  -q,--queue  N  number of queues per Vnic\n"
 	       "  -r,--rss       enable RSS\n"
+	       "  -m,--mac	 assign random MAC address\n"
 	       "  -v,--details   print packet details\n",
 	       argv0);
 	exit(1);
@@ -599,6 +619,7 @@ static const struct option longopts[] = {
 	{ "queue",	no_argument, 0, 'q' },
 	{ "rss",	no_argument, 0, 'r' },
 	{ "any",	no_argument, 0, 'a' },
+	{ "mac",	no_argument, 0, 'm' },
 	{ 0 }
 };
 
@@ -607,7 +628,7 @@ static void parse_args(int argc, char **argv)
 	unsigned int i;
 	int opt;
 
-	while ((opt = getopt_long(argc, argv, "avidsfpq:r",
+	while ((opt = getopt_long(argc, argv, "avidsfpq:rm",
 				  longopts, NULL)) != EOF) {
 		switch (opt) {
 		case 'a':
@@ -630,6 +651,9 @@ static void parse_args(int argc, char **argv)
 			break;
 		case 'p':
 			promisc = false;
+			break;
+		case 'm':
+			random_mac = true;
 			break;
 		case 'r':
 			rss_enabled = true;
