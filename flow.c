@@ -799,6 +799,13 @@ int main(int argc, char **argv)
 		       "Time", "Packets", "Bytes");
 	}
 
+	if (details) {
+		printf("\n[port:queue] ");
+		if (details > 1)
+			printf("pktno Δt");
+		printf("{vlan} Outer Ethernet...\n");
+	}
+
 	r = rte_eal_mp_remote_launch(rx_thread, NULL, CALL_MASTER);
 	if (r < 0)
 		rte_exit(EXIT_FAILURE, "cannot launch cores");
