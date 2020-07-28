@@ -3,17 +3,20 @@
  * All rights reserved.
  */
 
-#include <stdio.h>
-#include <stdbool.h>
-#include <arpa/inet.h>
-
-#include <rte_mbuf.h>
-#include <rte_ether.h>
-#include <rte_arp.h>
-#include <rte_ip.h>
-#include <rte_udp.h>
-#include <rte_vxlan.h>
+#include <arpa/inet.h>          // for inet_ntop
+#include <netinet/in.h>         // for ntohs, INET6_ADDRSTRLEN, IPPROTO_GRE
+#include <rte_arp.h>            // for rte_arp_hdr, RTE_ARP_OP_REPLY, RTE_AR...
+#include <rte_byteorder.h>      // for rte_be_to_cpu_16, rte_be_to_cpu_32
 #include <rte_cycles.h>
+#include <rte_ether.h>          // for rte_ether_hdr, rte_ether_format_addr
+#include <rte_gre.h>            // for rte_gre_hdr
+#include <rte_ip.h>             // for rte_ipv6_hdr, rte_ipv4_hdr, RTE_IPV4_...
+#include <rte_mbuf.h>		// for rte_mbuf, ...
+#include <rte_udp.h>            // for rte_udp_hdr
+#include <rte_vxlan.h>          // for rte_vxlan_hdr
+#include <stdint.h>             // for uint8_t, uint32_t, uint16_t
+#include <stdio.h>              // for printf, snprintf, size_t
+#include <sys/socket.h>         // for AF_INET, AF_INET6
 
 #include "pkt_dump.h"
 
@@ -30,6 +33,7 @@ static const char *ip_proto(uint16_t proto)
 	case IPPROTO_TCP:  return "TCP";
 	case IPPROTO_UDP:  return "UDP";
 	case IPPROTO_SCTP:  return "SCP";
+	case IPPROTO_GRE: return "GRE";
 	default:
 		snprintf(buf, sizeof(buf), "[%#x]", proto);
 		return buf;
@@ -42,6 +46,37 @@ static void vxlan_decode(const struct rte_vxlan_hdr *vxlan)
 
 	printf(" VXLAN %u ", vni);
 	pkt_decode((const struct rte_ether_hdr *)(vxlan + 1));
+}
+
+static void gre_decode(const void *p)
+{
+	const struct rte_gre_hdr *gre = p;
+
+	if (gre->proto == htons(0x6558)) {
+		printf(" NVGRE");
+	} else {
+		printf(" GRE[%#x]", ntohs(gre->proto));
+		return;
+	}
+
+	p = gre + 1;
+	if (gre->c) {
+		/* decode checksum? */
+	}
+
+	if (gre->k) {
+		const uint32_t *key = p;
+		uint32_t id = ntohl(*key);
+
+		printf(" %#x:%x ", id >> 8, id & 0xff);
+		p = key + 1;
+	}
+
+	if (gre->s) {
+		/* sequence number */
+	}
+
+	pkt_decode(p);
 }
 
 static void pkt_decode(const struct rte_ether_hdr *eh)
@@ -60,7 +95,7 @@ static void pkt_decode(const struct rte_ether_hdr *eh)
 
 		hlen = (ip->version_ihl & RTE_IPV4_HDR_IHL_MASK)
 			* RTE_IPV4_IHL_MULTIPLIER;
-		
+
 		inet_ntop(AF_INET, &ip->src_addr, src_str, INET_ADDRSTRLEN);
 		inet_ntop(AF_INET, &ip->dst_addr, dst_str, INET_ADDRSTRLEN);
 		printf("%s → %s ", src_str, dst_str);
@@ -75,7 +110,10 @@ static void pkt_decode(const struct rte_ether_hdr *eh)
 				return;
 			}
 		}
-
+		if (ip->next_proto_id == IPPROTO_GRE) {
+			gre_decode((const uint8_t *)ip + hlen);
+			return;
+		}
 		printf("%s", ip_proto(ip->next_proto_id));
 		break;
 	}
@@ -96,6 +134,10 @@ static void pkt_decode(const struct rte_ether_hdr *eh)
 				vxlan_decode((const struct rte_vxlan_hdr *)(udp +1));
 				return;
 			}
+		}
+		if (ip6->proto == IPPROTO_GRE) {
+			gre_decode((const uint8_t *)(ip6 + 1));
+			return;
 		}
 
 		printf("%s", ip_proto(ip6->proto));
@@ -123,7 +165,7 @@ void pkt_print(const struct rte_mbuf *m)
 
 	eh = rte_pktmbuf_mtod(m, const struct rte_ether_hdr *);
 	if (m->ol_flags & PKT_RX_VLAN_STRIPPED)
-		printf(" {%u}", m->vlan_tci);
+		printf("{%u} ", m->vlan_tci);
 
 	pkt_decode(eh);
 	printf(" length %u\n", m->pkt_len);
