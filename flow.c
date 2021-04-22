@@ -598,28 +598,28 @@ static void usage(const char *argv0)
 {
 	printf("Usage: %s [EAL options] -- [OPTIONS] MAC1 MAC2 ...\n"
 	       "  -a,--any       match any level\n"
-	       "  -i,--irq       IRQ mode\n"
 	       "  -d,--dst       destination mac only match\n"
-	       "  -s,--src       source mac only match\n"
 	       "  -f,--flow      flow dump\n"
+	       "  -i,--irq       IRQ mode\n"
+	       "  -m,--mac	 assign random MAC address\n"
 	       "  -p             don't put interface in promicious\n"
 	       "  -q,--queue  N  number of queues per Vnic\n"
 	       "  -r,--rss       enable RSS\n"
-	       "  -m,--mac	 assign random MAC address\n"
+	       "  -s,--src       source mac only match\n"
 	       "  -v,--details   print packet details\n",
 	       argv0);
 	exit(1);
 }
 
 static const struct option longopts[] = {
-	{ "irq",	no_argument, 0, 'i' },
-	{ "dst",	no_argument, 0, 'd' },
-	{ "src",	no_argument, 0, 's' },
-	{ "flow",	no_argument, 0, 'f' },
-	{ "queue",	no_argument, 0, 'q' },
-	{ "rss",	no_argument, 0, 'r' },
 	{ "any",	no_argument, 0, 'a' },
+	{ "dst",	no_argument, 0, 'd' },
+	{ "flow",	no_argument, 0, 'f' },
+	{ "irq",	no_argument, 0, 'i' },
 	{ "mac",	no_argument, 0, 'm' },
+	{ "queue",	required_argument, 0, 'q' },
+	{ "rss",	no_argument, 0, 'r' },
+	{ "src",	no_argument, 0, 's' },
 	{ 0 }
 };
 
