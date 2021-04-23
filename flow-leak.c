@@ -29,14 +29,12 @@
 static unsigned int num_vnic;
 static struct rte_ether_addr *vnic_mac;
 static struct rte_flow **src_flows, **dst_flows;
-static unsigned int num_queue = 1;
-static unsigned int repeat = 1;
+static uint16_t nrxq = 236;
+static uint16_t ntxq = 1;
+static unsigned int repeat = 10;
 
-#define MEMPOOL_CACHE	   256
 #define RX_DESC_DEFAULT	   256
 #define TX_DESC_DEFAULT	   512
-#define MAX_RX_QUEUE	   64
-#define PKTMBUF_POOL_RESERVED 128
 
 #define FLOW_SRC_MODE	1
 #define FLOW_DST_MODE	2
@@ -80,8 +78,6 @@ static struct rte_eth_conf port_conf = {
 				| DEV_TX_OFFLOAD_UDP_CKSUM,
 	},
 };
-
-static volatile bool running = true;
 
 static void port_config(uint16_t portid, uint16_t ntxq, uint16_t nrxq)
 {
@@ -237,7 +233,7 @@ flow_dst_mac(uint16_t port, uint32_t id,
 		.spec = &inner_flow,
 		.mask = &any_mask,
 	};
-	
+
 	*pat++ = (struct rte_flow_item) {
 		.type = RTE_FLOW_ITEM_TYPE_ETH,
 		.spec = &vnic_eth_dst,
@@ -253,7 +249,7 @@ flow_dst_mac(uint16_t port, uint32_t id,
 	return rte_flow_create(port, &attr, patterns, actions, err);
 }
 
-static void flow_create(uint16_t portid, uint16_t id, uint16_t q,
+static void vnic_create(uint16_t portid, uint16_t id, uint16_t q,
 			const struct rte_ether_addr *mac)
 {
 	struct rte_flow_action_queue queue = {
@@ -284,7 +280,7 @@ static void flow_create(uint16_t portid, uint16_t id, uint16_t q,
 			 "rte_eth_dev_rx_queue_start: q=%u failed\n", q);
 }
 
-static void flow_delete(uint16_t portid, uint16_t id, uint16_t q)
+static void vnic_delete(uint16_t portid, uint16_t id, uint16_t q)
 {
 	struct rte_flow_error err;
 	int r;
@@ -294,13 +290,13 @@ static void flow_delete(uint16_t portid, uint16_t id, uint16_t q)
 			 "rte_flow_destroy failed: %s\n error type %u %s\n",
 			 rte_strerror(rte_errno), err.type, err.message);
 	dst_flows[id] = NULL;
-	
+
 	if (rte_flow_destroy(portid, src_flows[id], &err))
 		rte_exit(EXIT_FAILURE,
 			 "rte_flow_destroy failed: %s\n error type %u %s\n",
 			 rte_strerror(rte_errno), err.type, err.message);
 	src_flows[id] = NULL;
-		
+
 	r = rte_eth_dev_rx_queue_stop(portid, q);
 	if (r < 0)
 		rte_exit(EXIT_FAILURE,
@@ -323,7 +319,6 @@ static void usage(const char *argv0)
 	printf("Usage: %s [EAL options] -- [OPTIONS] MAC1 MAC2 ...\n"
 	       "  -c,--count  N  repeat count\n"
 	       "  -f,--flow      flow dump\n"
-	       "  -q,--queue  N  number of queues per Vnic\n"
 	       "  -v,--details   print packet details\n",
 	       argv0);
 	exit(1);
@@ -332,7 +327,6 @@ static void usage(const char *argv0)
 static const struct option longopts[] = {
 	{ "count",      required_argument, 0, 'c' },
 	{ "flow",	no_argument, 0, 'f' },
-	{ "queue",	required_argument, 0, 'q' },
 	{ 0 }
 };
 
@@ -341,17 +335,20 @@ static void parse_args(int argc, char **argv)
 	unsigned int i;
 	int opt;
 
-	while ((opt = getopt_long(argc, argv, "c:q:f",
+	while ((opt = getopt_long(argc, argv, "c:q:fr:t:",
 				  longopts, NULL)) != EOF) {
 		switch (opt) {
 		case 'c':
 			repeat = atoi(optarg);
 			break;
-		case 'q':
-			num_queue = atoi(optarg);
-			break;
 		case 'f':
 			flow_dump = true;
+			break;
+		case 'r':
+			nrxq = atoi(optarg);
+			break;
+		case 't':
+			ntxq = atoi(optarg);
 			break;
 		default:
 			fprintf(stderr, "Unknown option\n");
@@ -373,9 +370,8 @@ static void parse_args(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
-	unsigned int v;
+	unsigned int v, iter;
 	unsigned int num_mbufs, obj_size;
-	uint16_t ntxq, nrxq;
 	int r;
 
 	r = rte_eal_init(argc, argv);
@@ -384,9 +380,6 @@ int main(int argc, char **argv)
 
 	parse_args(argc - r, argv + r);
 
-	ntxq = rte_lcore_count();
-	nrxq = num_vnic * num_queue + 1;
-
 	if (rte_eth_dev_count_avail() != 1)
 		rte_exit(EXIT_FAILURE,
 			 "Expect one external port\n");
@@ -394,36 +387,43 @@ int main(int argc, char **argv)
 	src_flows = calloc(num_vnic + 1, sizeof(struct rte_flow *));
 	dst_flows = calloc(num_vnic + 1, sizeof(struct rte_flow *));
 
-	num_mbufs =
-		rte_align32pow2(nrxq * RX_DESC_DEFAULT  * 3)
-		+ PKTMBUF_POOL_RESERVED;
-
-	/* rte_pktmbuf_pool_create is optimum with 2^q - 1 */
-	num_mbufs = rte_align32pow2(num_mbufs + 1) - 1;
-
-	mb_pool = rte_pktmbuf_pool_create("mb_pool", num_mbufs,
-					  MEMPOOL_CACHE, 0,
-					  RTE_MBUF_DEFAULT_BUF_SIZE, 0);
-	if (!mb_pool)
-		rte_exit(EXIT_FAILURE, "Cannot init mbuf pool\n");
-
+	num_mbufs = rte_align32pow2(nrxq * RX_DESC_DEFAULT * 3);
 	obj_size = rte_mempool_calc_obj_size(RTE_MBUF_DEFAULT_BUF_SIZE,
 					     0, NULL);
+
 	printf("mbuf pool %u of %u bytes = %uMb\n",
 		num_mbufs, obj_size,
 		(num_mbufs * obj_size) / (1024 * 1024));
 
+	mb_pool = rte_pktmbuf_pool_create("mb_pool", num_mbufs, 32, 0,
+					  RTE_MBUF_DEFAULT_BUF_SIZE, 0);
+	if (!mb_pool)
+		rte_exit(EXIT_FAILURE, "Cannot init mbuf pool\n");
+
+
 	port_config(0, ntxq, nrxq);
 	print_mac(0);
 
-	while (repeat-- > 0) {
-		for (v = 1; v <= num_vnic; ++v)
-			flow_create(0, v, v, &vnic_mac[v - 1]);
+	printf("Test started\n");
+	fflush(stdout);
 
-		for (v = 1; v <= num_vnic; ++v)
-			flow_delete(0, v, v);
+	for (iter = 0; iter < repeat; iter++) {
+		printf("\n%u: ", iter);
+		fflush(stdout);
+		for (v = 1; v <= num_vnic; ++v) {
+			printf("+"); fflush(stdout);
+			vnic_create(0, v, v, &vnic_mac[v - 1]);
+		}
+		sleep(1);
+
+		for (v = 1; v <= num_vnic; ++v) {
+			printf("-"); fflush(stdout);
+			vnic_delete(0, v, v);
+		}
 	}
 
+	printf("\nSUCCESS\n");
+	fflush(stdout);
 	rte_eth_dev_stop(0);
 	rte_eth_dev_close(0);
 	rte_eal_cleanup();
